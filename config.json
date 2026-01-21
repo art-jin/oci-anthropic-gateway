@@ -1,0 +1,10 @@
+{
+  "compartment_id": "ocid1.compartment.oc",
+  "endpoint": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+  "model_map": {
+    "claude-3-5-sonnet": "ocid1.generativeaimodel.oc1...........",
+    "claude-haiku": "ocid1.generativeaimodel.oc1...........",
+    "grok": "ocid1.generativeaimodel.oc1.us-chicago-1..........."
+  },
+  "default_model_ocid": "ocid1.generativeaimodel.oc1.us-chicago-1..........."
+}

@@ -7,42 +7,54 @@ from fastapi.responses import StreamingResponse
 import oci
 import uvicorn
 
-# --- 日志配置 ---
+# --- Logging configuration ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("oci-gateway")
 
 app = FastAPI(title="OCI GenAI Anthropic Gateway")
 
-# ----------------------- OCI 配置 -----------------------
-COMPARTMENT_ID = "ocid1.compartment.oc1..aaaaaaaakre3wvnmmhv474r2wrwlgunoeertbdi2v2tp3igwbu5sqyss3euq"
-ENDPOINT = "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com"
-
-# 模型映射表：将 Claude/Grok 的请求名映射到 OCI 的 OCID
-MODEL_MAP = {
-    "claude-3-5-sonnet": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3zoyev5tgdo3puutjfmxfnmpjutihhgqgtbyr7q6qtja",
-    "claude-haiku": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3zoyev5tgdo3puutjfmxfnmpjutihhgqgtbyr7q6qtja",
-    # 示例中指向同一个
-    "grok": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3zoyev5tgdo3puutjfmxfnmpjutihhgqgtbyr7q6qtja"
-}
-DEFAULT_MODEL_OCID = "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3zoyev5tgdo3puutjfmxfnmpjutihhgqgtbyr7q6qtja"
+# ----------------------- Load Custom Configuration from File -----------------------
+CONFIG_FILE = "config.json"  # Configuration file name (in the same directory)
 
 try:
-    config = oci.config.from_file('~/.oci/config', "DEFAULT")
+    with open(CONFIG_FILE, "r") as f:
+        custom_config = json.load(f)
+    COMPARTMENT_ID = custom_config["compartment_id"]
+    ENDPOINT = custom_config["endpoint"]
+    MODEL_MAP = custom_config["model_map"]
+    DEFAULT_MODEL_OCID = custom_config["default_model_ocid"]
+    logger.info("Custom configuration loaded successfully from config.json")
+except FileNotFoundError:
+    logger.error(f"Configuration file {CONFIG_FILE} not found")
+    raise
+except KeyError as e:
+    logger.error(f"Missing key in configuration file: {e}")
+    raise
+except json.JSONDecodeError:
+    logger.error("Invalid JSON in configuration file")
+    raise
+
+# Load OCI SDK configuration from default file
+try:
+    sdk_config = oci.config.from_file('~/.oci/config', "DEFAULT")
     genai_client = oci.generative_ai_inference.GenerativeAiInferenceClient(
-        config=config,
+        config=sdk_config,
         service_endpoint=ENDPOINT,
         retry_strategy=oci.retry.NoneRetryStrategy(),
         timeout=(10, 240)
     )
-    logger.info("OCI SDK 初始化成功")
+    logger.info("OCI SDK initialized successfully")
 except Exception as e:
-    logger.error(f"配置加载失败: {e}")
+    logger.error(f"SDK configuration loading failed: {e}")
     raise
 
 
-# ----------------------- 核心逻辑 -----------------------
+# ----------------------- Core streaming generation function -----------------------
 
 async def generate_oci_stream(oci_messages, params, message_id, model_ocid):
+    """
+    Generate streaming response from OCI GenAI and format it as Anthropic-compatible SSE.
+    """
     chat_detail = oci.generative_ai_inference.models.ChatDetails()
     chat_request = oci.generative_ai_inference.models.GenericChatRequest()
     chat_request.messages = oci_messages
@@ -56,48 +68,105 @@ async def generate_oci_stream(oci_messages, params, message_id, model_ocid):
     chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_ocid)
 
     try:
-        # 1. 启动帧
-        yield f"data: {json.dumps({'type': 'message_start', 'message': {'id': message_id, 'type': 'message', 'role': 'assistant', 'content': [], 'model': 'claude-3-5-sonnet', 'usage': {'input_tokens': 0, 'output_tokens': 0}}})}\n\n"
-        yield f"data: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+        # 1. Required starting events (Claude Code needs these to initialize display)
+        yield f"event: message_start\ndata: {json.dumps({
+            'type': 'message_start',
+            'message': {
+                'id': message_id,
+                'type': 'message',
+                'role': 'assistant',
+                'model': 'claude-3-5-sonnet-20241022',  # Fixed or dynamically from params
+                'content': [],
+                'stop_reason': None,
+                'stop_sequence': None,
+                'usage': {'input_tokens': 10, 'output_tokens': 0}  # Rough estimate for input
+            }
+        })}\n\n"
 
+        yield f"event: content_block_start\ndata: {json.dumps({
+            'type': 'content_block_start',
+            'index': 0,
+            'content_block': {'type': 'text', 'text': ''}
+        })}\n\n"
+
+        # Call OCI
         response = genai_client.chat(chat_detail)
 
+        accumulated_text = ""  # Used for usage estimation and debugging
+
         for event in response.data.events():
-            if not event.data: continue
+            if not event.data:
+                continue
             try:
                 data = json.loads(event.data)
-                # 针对你的日志路径提取
-                text = data.get("message", {}).get("content", [{}])[0].get("text", "")
-                if text:
-                    yield f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text', 'text': text}})}\n\n"
-            except:
+                text_chunk = data.get("message", {}).get("content", [{}])[0].get("text", "")
+
+                if text_chunk:
+                    # print("OCI chunk:", repr(text_chunk))  # Keep debug print
+                    accumulated_text += text_chunk
+
+                    # Key: include event header + correct delta type 'text_delta'
+                    yield f"event: content_block_delta\ndata: {json.dumps({
+                        'type': 'content_block_delta',
+                        'index': 0,
+                        'delta': {
+                            'type': 'text_delta',
+                            'text': text_chunk
+                        }
+                    })}\n\n"
+
+            except json.JSONDecodeError:
+                logger.warning("Invalid JSON chunk, skipped")
+                continue
+            except Exception as e:
+                logger.warning(f"Chunk processing exception: {e}")
                 continue
 
-        # 2. 结束帧
-        yield f"data: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
-        yield f"data: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'output_tokens': 0}})}\n\n"
-        yield f"data: {json.dumps({'type': 'message_stop'})}\n\n"
-        yield "data: [DONE]\n\n"
+        # 3. Required ending sequence (otherwise Claude Code won't stop thinking/display)
+        yield f"event: content_block_stop\ndata: {json.dumps({
+            'type': 'content_block_stop',
+            'index': 0
+        })}\n\n"
+
+        estimated_output_tokens = max(1, len(accumulated_text) // 4)  # Rough estimation
+        yield f"event: message_delta\ndata: {json.dumps({
+            'type': 'message_delta',
+            'delta': {
+                'stop_reason': 'end_turn',
+                'stop_sequence': None
+            },
+            'usage': {
+                'output_tokens': estimated_output_tokens,
+                'input_tokens': 50  # Rough estimate, can be adjusted from params or OCI
+            }
+        })}\n\n"
+
+        yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+        yield "data: [DONE]\n\n"  # Keep your [DONE]
 
     except Exception as e:
-        logger.exception("流式输出异常")
-        yield f"data: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n"
+        logger.exception("Streaming output exception")
+        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n"
 
 
-# ----------------------- 路由 -----------------------
+# ----------------------- Routes -----------------------
 
 @app.post("/{path:path}")
 async def catch_all(path: str, request: Request):
-    # 自动处理通用的 telemetry 和 token 计数请求
+    """
+    Catch-all route to handle all incoming paths.
+    Handles telemetry, token count, and messages requests.
+    """
+    # Automatically handle common telemetry and token count requests (avoid 404)
     if "event_logging" in path or "count_tokens" in path:
         return {"status": "ok", "input_tokens": 10}
 
-    # 处理消息请求
+    # Handle messages request
     if "messages" in path:
         body = await request.json()
         model_name = body.get("model", "").lower()
 
-        # 查找匹配的 OCID
+        # Find matching OCID
         selected_ocid = DEFAULT_MODEL_OCID
         for key, val in MODEL_MAP.items():
             if key in model_name:
@@ -106,10 +175,10 @@ async def catch_all(path: str, request: Request):
 
         message_id = f"msg_oci_{uuid.uuid4().hex}"
 
-        # 转换消息格式
+        # Convert messages to OCI structure
         oci_msgs = []
         for m in body.get("messages", []):
-            txt = m["content"] if isinstance(m["content"], str) else "".join([i.get("text", "") for i in m["content"]])
+            txt = m["content"] if isinstance(m["content"], str) else "".join([i.get("text", "") for i in m["content"] or []])
             oci_msg = oci.generative_ai_inference.models.Message()
             oci_msg.role = m["role"].upper()
             oci_msg.content = [oci.generative_ai_inference.models.TextContent(text=txt)]
@@ -122,12 +191,12 @@ async def catch_all(path: str, request: Request):
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no"  # 禁用 Nginx 等代理的缓冲
+                    "X-Accel-Buffering": "no"  # Prevent proxy buffering for streaming
                 }
             )
         else:
-            # 非流式逻辑省略，结构同前...
-            pass
+            # Non-streaming logic (omitted here, can be added later)
+            return {"detail": "Non-stream not implemented yet"}
 
     return {"detail": "Not Found"}
 

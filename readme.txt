@@ -14,5 +14,4 @@ python oci-anthropic-gateway.py
 export OCI_COMPARTMENT_ID=ocid1.compartment.oc1.........
 export ANTHROPIC_BASE_URL=http://localhost:8000/
 export ANTHROPIC_API_KEY=dummy_key
-export ANTHROPIC_MODEL=oci genai model, eg.xai.grok-4-fast
 claude

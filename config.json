@@ -1,10 +1,42 @@
 {
-  "compartment_id": "ocid1.compartment.oc",
+  "compartment_id": "ocid1.compartment.oc1......your compartment_id .",
   "endpoint": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
-  "model_map": {
-    "claude-3-5-sonnet": "ocid1.generativeaimodel.oc1...........",
-    "claude-haiku": "ocid1.generativeaimodel.oc1...........",
-    "grok": "ocid1.generativeaimodel.oc1.us-chicago-1..........."
+  "model_aliases": {
+    "claude-haiku-4-5": "xai.grok-code-fast-1",
+    "claude-3-5-sonnet": "xai.grok-code-fast-1",
+    "claude-3-haiku": "xai.grok-code-fast-1"
   },
-  "default_model_ocid": "ocid1.generativeaimodel.oc1.us-chicago-1..........."
+  "model_definitions": {
+    "xai.grok-4-fast-non-reasoning": {
+      "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1...your model ocid .",
+      "max_tokens_key": "max_tokens",
+      "temperature": 0.7
+    },
+    "xai.grok-4-fast-reasoning": {
+      "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.....your model ocid .",
+      "max_tokens_key": "max_tokens",
+      "temperature": 0.7
+    },
+    "xai.grok-code-fast-1": {
+      "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.....your model ocid .",
+      "max_tokens_key": "max_tokens",
+      "temperature": 0.7
+    },
+    "openai.gpt-oss-20b": {
+      "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.....your model ocid .",
+      "max_tokens_key": "max_completion_tokens",
+      "temperature": 0.7
+    },
+    "openai.gpt-oss-120b": {
+      "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.....your model ocid .",
+      "max_tokens_key": "max_completion_tokens",
+      "temperature": 0.7
+    },
+    "openai.gpt-5": {
+      "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.",
+      "max_tokens_key": "max_completion_tokens",
+      "temperature": 1.0
+    }
+  },
+  "default_model": "xai.grok-code-fast-1"
 }

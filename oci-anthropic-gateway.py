@@ -3,7 +3,7 @@ import json
 import logging
 import uuid
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import oci
 import uvicorn
 
@@ -51,6 +51,116 @@ try:
 except Exception as e:
     logger.error(f"SDK configuration loading failed: {e}")
     raise
+
+
+# ----------------------- Core non-streaming generation function -----------------------
+
+async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, requested_model):
+    """
+    Generate non-streaming response from OCI GenAI and format it as Anthropic-compatible JSON.
+    """
+    chat_detail = oci.generative_ai_inference.models.ChatDetails()
+    chat_request = oci.generative_ai_inference.models.GenericChatRequest()
+    chat_request.messages = oci_messages
+
+    # --- Dynamic Parameter Adaptation ---
+    # 1. Handle Max Tokens (determine which key to use based on model definition)
+    token_limit = params.get("max_tokens", 131070)  # 65535 * 2
+    tokens_key = model_conf.get("max_tokens_key", "max_tokens")
+    setattr(chat_request, tokens_key, token_limit)
+
+    # 2. Handle Temperature (prioritize hardcoded value in model definition, otherwise use request value)
+    chat_request.temperature = model_conf.get("temperature", params.get("temperature", 0.7))
+
+    chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
+    chat_request.is_stream = False
+
+    chat_detail.chat_request = chat_request
+    chat_detail.compartment_id = COMPARTMENT_ID
+    chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_conf["ocid"])
+
+    try:
+        # Call OCI (non-streaming)
+        response = genai_client.chat(chat_detail)
+
+        # Parse the response
+        accumulated_text = ""
+        response_data = response.data
+
+        # Try to extract text from the response
+        if hasattr(response_data, 'chat_response'):
+            chat_response = response_data.chat_response
+            # Handle different response structures
+            if hasattr(chat_response, 'choices') and chat_response.choices:
+                choice = chat_response.choices[0]
+                if hasattr(choice, 'message'):
+                    msg = choice.message
+                    if hasattr(msg, 'content'):
+                        if isinstance(msg.content, list):
+                            accumulated_text = "".join([c.get('text', '') if isinstance(c, dict) else str(c) for c in msg.content])
+                        else:
+                            accumulated_text = msg.content
+            elif hasattr(chat_response, 'message'):
+                msg = chat_response.message
+                if hasattr(msg, 'content'):
+                    if isinstance(msg.content, list):
+                        accumulated_text = "".join([c.get('text', '') if isinstance(c, dict) else str(c) for c in msg.content])
+                    else:
+                        accumulated_text = msg.content
+        else:
+            # Fallback: try to parse as JSON
+            try:
+                data = json.loads(str(response_data))
+                choices = data.get("choices", [])
+                if choices:
+                    accumulated_text = choices[0].get("message", {}).get("content", "")
+                else:
+                    content = data.get("message", {}).get("content", [])
+                    if isinstance(content, list):
+                        accumulated_text = "".join([c.get("text", "") for c in content])
+                    else:
+                        accumulated_text = str(content)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Could not parse non-streaming response as JSON")
+
+        # Estimate token usage
+        estimated_output_tokens = max(1, len(accumulated_text) // 4)
+        estimated_input_tokens = sum(len(str(m.content)) // 4 for m in oci_messages)
+
+        # Format as Anthropic-compatible response
+        anthropic_response = {
+            "id": message_id,
+            "type": "message",
+            "role": "assistant",
+            "model": requested_model,
+            "content": [
+                {
+                    "type": "text",
+                    "text": accumulated_text
+                }
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": estimated_input_tokens,
+                "output_tokens": estimated_output_tokens
+            }
+        }
+
+        return JSONResponse(content=anthropic_response)
+
+    except Exception as e:
+        logger.exception("Non-streaming output exception")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "internal_error",
+                    "message": str(e)
+                }
+            }
+        )
 
 
 # ----------------------- Core streaming generation function -----------------------
@@ -224,8 +334,8 @@ async def catch_all(path: str, request: Request):
                 }
             )
         else:
-            # Non-streaming logic (to be implemented)
-            return {"detail": "Non-stream not implemented yet"}
+            # Non-streaming logic
+            return await generate_oci_non_stream(oci_msgs, body, message_id, selected_model_conf, req_model)
 
     return {"detail": "Not Found"}
 

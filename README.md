@@ -32,6 +32,30 @@ The gateway runs on `0.0.0.0:8000` by default.
 
 The gateway loads configuration from `config.json`:
 
+### Setup (First Time)
+
+1. **Copy the template**:
+   ```bash
+   cp config.json.template config.json
+   ```
+
+2. **Edit `config.json` with your OCI credentials**:
+   - `compartment_id`: Your OCI compartment OCID
+   - `endpoint`: OCI GenAI service endpoint (region-specific)
+   - `model_definitions`: Replace `your-model-ocid` with actual OCI model OCIDs
+
+3. **Configure OCI SDK** in `~/.oci/config`:
+   ```ini
+   [DEFAULT]
+   user=ocid1.user.oc1...
+   fingerprint=...
+   tenancy=ocid1.tenancy.oc1...
+   region=us-chicago-1
+   key_file=~/.oci/oci_api_key.pem
+   ```
+
+### Configuration Options
+
 - `compartment_id`: OCI compartment OCID
 - `endpoint`: OCI GenAI service endpoint (region-specific)
 - `model_aliases`: Maps Anthropic model names to OCI model keys
@@ -41,7 +65,7 @@ The gateway loads configuration from `config.json`:
   - `temperature`: Fixed temperature (overrides request)
 - `default_model`: Fallback model when requested model not found
 
-OCI SDK authentication is loaded from `~/.oci/config` (DEFAULT profile).
+> **⚠️ SECURITY**: `config.json` is in `.gitignore` and will not be committed. Never commit files containing real OCIDs or API keys.
 
 ## Architecture
 

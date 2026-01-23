@@ -1,5 +1,5 @@
 {
-  "compartment_id": "ocid1.compartment.oc1..aaaaaaaakre3wvnmmhv474r2wrwlgunoeertbdi2v2tp3igwbu5sqyss3euq",
+  "compartment_id": "ocid1.compartment.oc1..your-compartment-id",
   "endpoint": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
   "model_aliases": {
     "claude-haiku-4-5": "xai.grok-4-fast-non-reasoning",
@@ -8,7 +8,7 @@
   },
   "model_definitions": {
     "xai.grok-4-fast-non-reasoning": {
-      "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3zoyev5tgdo3puutjfmxfnmpjutihhgqgtbyr7q6qtja",
+      "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.your-model-ocid",
       "max_tokens_key": "max_tokens",
       "temperature": 0.7
     },

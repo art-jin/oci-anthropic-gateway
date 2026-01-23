@@ -460,7 +460,7 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
                 "Structure your response to clearly separate your thinking from your final answer."
             )
             # Prepend thinking instruction to messages
-            oci_msgs.insert(0, oci.generative_ai_inference.models.Message(
+            oci_messages.insert(0, oci.generative_ai_inference.models.Message(
                 role="SYSTEM",
                 content=[oci.generative_ai_inference.models.TextContent(text=thinking_instruction)]
             ))
@@ -728,7 +728,7 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
                 "Structure your response to clearly separate your thinking from your final answer."
             )
             # Prepend thinking instruction to messages
-            oci_msgs.insert(0, oci.generative_ai_inference.models.Message(
+            oci_messages.insert(0, oci.generative_ai_inference.models.Message(
                 role="SYSTEM",
                 content=[oci.generative_ai_inference.models.TextContent(text=thinking_instruction)]
             ))

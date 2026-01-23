@@ -67,6 +67,243 @@ The gateway loads configuration from `config.json`:
 
 > **⚠️ SECURITY**: `config.json` is in `.gitignore` and will not be committed. Never commit files containing real OCIDs or API keys.
 
+## Supported Features
+
+### Core Messages API
+
+The gateway supports the full Anthropic Messages API with the following features:
+
+#### 1. System Prompts
+
+Define system-level instructions for the model:
+
+```json
+{
+    "model": "claude-3-5-sonnet-20241022",
+    "system": "You are a helpful assistant specialized in Python programming.",
+    "messages": [
+        {"role": "user", "content": "How do I read a file in Python?"}
+    ]
+}
+```
+
+**Array format** (supports cache_control):
+```json
+{
+    "system": [
+        {"type": "text", "text": "You are a helpful assistant."},
+        {"type": "text", "text": "Be concise and accurate."}
+    ]
+}
+```
+
+#### 2. Tool Calling (Function Calling)
+
+Enable the model to call external functions:
+
+```json
+{
+    "model": "claude-3-5-sonnet-20241022",
+    "tools": [
+        {
+            "name": "get_weather",
+            "description": "Get current weather for a location",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"}
+                },
+                "required": ["location"]
+            }
+        }
+    ],
+    "messages": [
+        {"role": "user", "content": "What's the weather in Tokyo?"}
+    ]
+}
+```
+
+**Tool Choice Options**:
+- `"auto"` (default): Model decides when to use tools
+- `"any"`: Must use at least one tool
+- `"none"`: Don't use tools
+- `{"type": "tool", "name": "tool_name"}`: Force specific tool
+
+#### 3. Thinking Mode (Extended Thinking)
+
+Enable the model to show its reasoning process:
+
+```json
+{
+    "model": "claude-3-5-sonnet-20241022",
+    "thinking": {
+        "type": "enabled",
+        "budget_tokens": 16000
+    },
+    "messages": [
+        {"role": "user", "content": "Solve this complex problem step by step."}
+    ]
+}
+```
+
+#### 4. Sampling Parameters
+
+Control the model's output generation:
+
+```json
+{
+    "model": "claude-3-5-sonnet-20241022",
+    "temperature": 0.7,
+    "top_k": 50,
+    "top_p": 0.9,
+    "max_tokens": 4096,
+    "messages": [...]
+}
+```
+
+| Parameter | Range | Description |
+|-----------|-------|-------------|
+| `temperature` | 0.0 - 1.0 | Controls randomness (lower = more focused) |
+| `top_k` | > 0 | Limit to top K most probable tokens |
+| `top_p` | 0.0 - 1.0 | Nucleus sampling threshold |
+| `max_tokens` | > 0 | Maximum tokens to generate |
+
+#### 5. Stop Sequences
+
+Define custom stop strings to end generation:
+
+```json
+{
+    "model": "claude-3-5-sonnet-20241022",
+    "stop_sequences": ["\n\n", "END", "###"],
+    "messages": [...]
+}
+```
+
+#### 6. Images / Vision
+
+Send images for analysis (base64 encoded):
+
+```json
+{
+    "model": "claude-3-5-sonnet-20241022",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What's in this image?"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA..."
+                    }
+                }
+            ]
+        }
+    ]
+}
+```
+
+#### 7. Prompt Caching
+
+Cache frequently used prompts to reduce costs:
+
+```json
+{
+    "system": [
+        {
+            "type": "text",
+            "text": "You are a helpful assistant with extensive knowledge...",
+            "cache_control": {"type": "ephemeral"}
+        }
+    ],
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Here is a large document to analyze...",
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        }
+    ]
+}
+```
+
+**Response includes cache metrics**:
+```json
+{
+    "usage": {
+        "input_tokens": 1500,
+        "output_tokens": 200,
+        "cache_creation_input_tokens": 1200,
+        "cache_read_input_tokens": 300
+    }
+}
+```
+
+#### 8. Metadata
+
+Attach custom metadata to requests for tracking:
+
+```json
+{
+    "model": "claude-3-5-sonnet-20241022",
+    "metadata": {
+        "user_id": "usr_12345",
+        "conversation_id": "conv_abc789",
+        "request_id": "req_xyz456"
+    },
+    "messages": [...]
+}
+```
+
+**Response echoes metadata**:
+```json
+{
+    "type": "message",
+    "content": [...],
+    "metadata": {
+        "user_id": "usr_12345",
+        "conversation_id": "conv_abc789"
+    }
+}
+```
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/messages` | POST | Create a message (streaming & non-streaming) |
+| `/v1/messages/count_tokens` | POST | Count tokens in request |
+
+### Token Counting
+
+Estimate tokens before making a request:
+
+```bash
+curl -X POST http://localhost:8001/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "messages": [
+      {"role": "user", "content": "Hello, how are you?"}
+    ]
+  }'
+```
+
+Response:
+```json
+{
+  "type": "usage",
+  "input_tokens": 12
+}
+```
+
 ## Architecture
 
 **Single-file design**: All logic is in `oci-anthropic-gateway.py`

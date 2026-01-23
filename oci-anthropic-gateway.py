@@ -1,4 +1,4 @@
-import os
+import asyncio
 import json
 import logging
 import uuid
@@ -10,6 +10,9 @@ import uvicorn
 # --- Logging configuration ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("oci-gateway")
+
+# --- Constants ---
+DEFAULT_MAX_TOKENS = 131070  # Maximum tokens for generation (65535 * 2)
 
 app = FastAPI(title="OCI GenAI Anthropic Gateway")
 
@@ -65,7 +68,7 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
 
     # --- Dynamic Parameter Adaptation ---
     # 1. Handle Max Tokens (determine which key to use based on model definition)
-    token_limit = params.get("max_tokens", 131070)  # 65535 * 2
+    token_limit = params.get("max_tokens", DEFAULT_MAX_TOKENS)
     tokens_key = model_conf.get("max_tokens_key", "max_tokens")
     setattr(chat_request, tokens_key, token_limit)
 
@@ -80,8 +83,8 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
     chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_conf["ocid"])
 
     try:
-        # Call OCI (non-streaming)
-        response = genai_client.chat(chat_detail)
+        # Call OCI (non-streaming) - run in thread pool to avoid blocking event loop
+        response = await asyncio.to_thread(genai_client.chat, chat_detail)
 
         # Parse the response
         accumulated_text = ""
@@ -157,7 +160,7 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
                 "type": "error",
                 "error": {
                     "type": "internal_error",
-                    "message": str(e)
+                    "message": "An internal error occurred. Please check the logs for details."
                 }
             }
         )
@@ -175,7 +178,7 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
 
     # --- Dynamic Parameter Adaptation ---
     # 1. Handle Max Tokens (determine which key to use based on model definition)
-    token_limit = params.get("max_tokens", 131070)  # 65535 * 2
+    token_limit = params.get("max_tokens", DEFAULT_MAX_TOKENS)
     tokens_key = model_conf.get("max_tokens_key", "max_tokens")
     setattr(chat_request, tokens_key, token_limit)
 
@@ -213,8 +216,8 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
             'content_block': {'type': 'text', 'text': ''}
         })}\n\n"
 
-        # Call OCI
-        response = genai_client.chat(chat_detail)
+        # Call OCI - run in thread pool to avoid blocking event loop
+        response = await asyncio.to_thread(genai_client.chat, chat_detail)
 
         accumulated_text = ""  # Used for usage estimation and debugging
 
@@ -274,7 +277,7 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
 
     except Exception as e:
         logger.exception("Streaming output exception")
-        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n"
+        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': 'An internal error occurred. Please check the logs for details.'}})}\n\n"
 
 
 # ----------------------- Routes -----------------------

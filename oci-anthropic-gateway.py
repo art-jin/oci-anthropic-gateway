@@ -65,7 +65,7 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
 
     # --- Dynamic Parameter Adaptation ---
     # 1. Handle Max Tokens (determine which key to use based on model definition)
-    token_limit = params.get("max_tokens", 65535)
+    token_limit = params.get("max_tokens", 131070)  # 65535 * 2
     tokens_key = model_conf.get("max_tokens_key", "max_tokens")
     setattr(chat_request, tokens_key, token_limit)
 

@@ -99,11 +99,15 @@ Define system-level instructions for the model:
 
 #### 2. Tool Calling (Function Calling)
 
-Enable the model to call external functions:
+Enable the model to call external functions. The gateway supports tool calling through two mechanisms:
+
+**1. Native Function Calling (Cohere Models)**
+
+Models configured with `api_format: "cohere"` use OCI's native Function Calling support:
 
 ```json
 {
-    "model": "claude-3-5-sonnet-20241022",
+    "model": "cohere.command-r-plus",
     "tools": [
         {
             "name": "get_weather",
@@ -123,11 +127,65 @@ Enable the model to call external functions:
 }
 ```
 
+**2. Simulated Tool Calling (Generic Models)**
+
+For models configured with `api_format: "generic"` (xAI Grok, OpenAI GPT, etc.), the gateway uses prompt engineering to simulate tool calling:
+
+- The gateway injects a system prompt with tool definitions and usage instructions
+- Models are instructed to output tool calls in `<TOOL_CALL>JSON</TOOL_CALL>` format
+- The gateway detects and parses these tool call blocks
+- Supports multiple tool calls in a single response
+
+**Configuration Example**:
+
+```json
+{
+    "model_definitions": {
+        "cohere.command-r-plus": {
+            "ocid": "ocid1.generativeaimodel.oc1...",
+            "api_format": "cohere",
+            "max_tokens_key": "max_tokens",
+            "temperature": 0.7
+        },
+        "openai.gpt-5.2-2025-12-11": {
+            "ocid": "ocid1.generativeaimodel.oc1...",
+            "api_format": "generic",
+            "max_tokens_key": "max_completion_tokens",
+            "temperature": 1.0
+        }
+    }
+}
+```
+
 **Tool Choice Options**:
 - `"auto"` (default): Model decides when to use tools
-- `"any"`: Must use at least one tool
+- `"any"` or `"required"`: Must use at least one tool
 - `"none"`: Don't use tools
 - `{"type": "tool", "name": "tool_name"}`: Force specific tool
+
+**Tool Response Format**:
+
+The gateway converts tool results back to Anthropic format:
+
+```json
+{
+    "role": "user",
+    "content": [
+        {
+            "type": "tool_result",
+            "tool_use_id": "toolu_abc123",
+            "content": "The weather in Tokyo is 22°C and sunny."
+        }
+    ]
+}
+```
+
+**Implementation Details**:
+
+- **Native (Cohere)**: Uses `CohereChatRequest` with `tools` and `tool_results` parameters
+- **Simulated (Generic)**: Injects system prompt with tool definitions, detects `<TOOL_CALL>` blocks in model output
+- **Streaming**: Buffers text during streaming to detect tool calls, sends clean text + tool call events
+- **Multi-tool**: Supports detecting and parsing multiple `<TOOL_CALL>` blocks in one response
 
 #### 3. Thinking Mode (Extended Thinking)
 

@@ -108,7 +108,7 @@ def count_tokens_from_messages(messages: List[dict], system: Optional[Union[str,
 # ----------------------- Tool Calling Helper Functions -----------------------
 
 def anthropic_to_oci_tools(tools: list) -> list:
-    """Convert Anthropic tools to OCI ToolDefinition format"""
+    """Convert Anthropic tools to OCI ToolDefinition format (for Generic API)"""
     oci_tools = []
     for tool in tools:
         oci_tool = {
@@ -123,8 +123,170 @@ def anthropic_to_oci_tools(tools: list) -> list:
     return oci_tools
 
 
+def anthropic_to_cohere_tools(tools: list) -> list:
+    """Convert Anthropic tools to CohereTool format (for Cohere API)"""
+    cohere_tools = []
+    for tool in tools:
+        # Get input schema
+        input_schema = tool.get("input_schema", tool.get("parameters", {}))
+        properties = input_schema.get("properties", {})
+        required = input_schema.get("required", [])
+
+        # Convert to Cohere parameter definitions
+        parameter_definitions = {}
+        for param_name, param_info in properties.items():
+            param_def = oci.generative_ai_inference.models.CohereParameterDefinition(
+                description=param_info.get("description", ""),
+                type=_convert_json_type_to_python(param_info.get("type", "str")),
+                is_required=param_name in required
+            )
+            parameter_definitions[param_name] = param_def
+
+        cohere_tool = oci.generative_ai_inference.models.CohereTool(
+            name=tool["name"],
+            description=tool.get("description", ""),
+            parameter_definitions=parameter_definitions
+        )
+        cohere_tools.append(cohere_tool)
+    return cohere_tools
+
+
+def _convert_json_type_to_python(json_type: str) -> str:
+    """Convert JSON Schema type to Python type string for Cohere"""
+    type_mapping = {
+        "string": "str",
+        "str": "str",
+        "integer": "int",
+        "number": "float",
+        "float": "float",
+        "boolean": "bool",
+        "array": "list",
+        "object": "dict"
+    }
+    return type_mapping.get(json_type, "str")
+
+
+def _build_tool_use_instruction(tools: list, tool_choice: str) -> str:
+    """
+    Build tool use instruction prompt for Generic format models.
+
+    This creates a system prompt that instructs the model on how to use tools
+    when it doesn't have native function calling support.
+    """
+    if not tools:
+        return ""
+
+    # Build tool descriptions
+    tool_list = []
+    for tool in tools:
+        # Handle different tool formats
+        if isinstance(tool, dict):
+            name = tool.get("name")
+            desc = tool.get("description", "")
+            # Support both input_schema and parameters
+            schema = tool.get("input_schema") or tool.get("parameters") or {}
+        else:
+            logger.warning(f"Unexpected tool format: {type(tool)}")
+            continue
+
+        if not name:
+            logger.warning(f"Tool missing 'name' field: {tool}")
+            continue
+
+        # Build parameter descriptions
+        params_desc = []
+        required = schema.get("required", [])
+        properties = schema.get("properties", {})
+
+        if properties:
+            for param, info in properties.items():
+                req_mark = "**(required)**" if param in required else "(optional)"
+                param_desc = info.get('description', '')
+                param_type = info.get('type', 'string')
+                params_desc.append(f"  - `{param}` {req_mark} ({param_type}): {param_desc}")
+
+        params_str = "\n".join(params_desc) if params_desc else "  (no parameters)"
+
+        tool_list.append(f"""**{name}**: {desc}
+Parameters:
+{params_str}""")
+
+    # Tool choice strategy description
+    strategy_map = {
+        "auto": "Use tools when the user's request requires it. If the user's question can be answered directly without tools, respond normally.",
+        "required": "You MUST use at least one tool to address the user's request. Do not answer without calling a tool.",
+        "none": "Do not use any tools. Answer the user's question directly.",
+        "any": "Use tools when appropriate for the user's request."
+    }
+    strategy = strategy_map.get(tool_choice, "auto")
+
+    # Few-shot examples - more explicit format
+    examples = """## Examples
+
+**Example 1 - Using a single tool:**
+User: "What's the weather in Tokyo?"
+<TOOL_CALL>
+{"name": "WebSearch", "input": {"query": "weather in Tokyo"}}
+</TOOL_CALL>
+
+**Example 2 - Direct answer (no tool needed):**
+User: "Hello, how are you?"
+I'm doing well, thank you for asking! How can I help you today?
+
+**Example 3 - Multiple tools:**
+User: "Search for Python tutorials and read the file README.md"
+<TOOL_CALL>
+{"name": "WebSearch", "input": {"query": "Python tutorials"}}
+</TOOL_CALL>
+<TOOL_CALL>
+{"name": "Read", "input": {"file_path": "README.md"}}
+</TOOL_CALL>
+
+**Example 4 - Tool with no output:**
+User: "Create a file named test.txt"
+<TOOL_CALL>
+{"name": "Write", "input": {"file_path": "test.txt", "content": ""}}
+</TOOL_CALL>
+
+**IMPORTANT**: When you use a tool, output ONLY the <TOOL_CALL> block(s). Do not include any additional text before or after the tool call(s)."""
+
+    return f"""# Tool Use Guidelines
+
+You have access to the following tools that you can use to help answer user requests:
+
+{chr(10).join(tool_list)}
+
+## Tool Call Format
+
+When you need to use a tool, output your response in this exact format:
+
+<TOOL_CALL>
+{{
+  "name": "tool_name",
+  "input": {{
+    "parameter1": "value1",
+    "parameter2": "value2"
+  }}
+}}
+</TOOL_CALL>
+
+**CRITICAL RULES**:
+
+1. When you need to use a tool, output ONLY the <TOOL_CALL> block(s)
+2. Do NOT include any additional text, explanations, or formatting outside the <TOOL_CALL> tags
+3. Tool selection strategy: {strategy}
+4. Output the tool call in the EXACT format shown above (with <TOOL_CALL> opening and closing tags)
+5. You can output multiple tool calls by placing multiple <TOOL_CALL> blocks one after another
+6. If no tools are needed, respond directly to the user in natural language
+7. Do not invent or make up parameter values - if a required parameter is not provided, ask the user
+
+{examples}
+
+Remember: When using tools, output ONLY the tool call block(s) with no additional text!"""
+
+
 def convert_tool_choice(tool_choice: Union[str, dict, None]) -> dict:
-    """Convert Anthropic tool_choice to OCI format"""
+    """Convert Anthropic tool_choice to OCI format (for Generic API)"""
     if tool_choice is None or tool_choice == "auto":
         return {"type": "auto"}
     elif tool_choice == "none":
@@ -289,7 +451,7 @@ def convert_content_to_oci(content: Union[str, List[dict]]) -> Union[str, List]:
 
 def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
     """
-    Extract tool calls from OCI response.
+    Extract tool calls from OCI Generic API response.
 
     Returns list of tool_use blocks in Anthropic format, or None if no tool calls.
     """
@@ -337,6 +499,168 @@ def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
     return tool_calls if tool_calls else None
 
 
+def extract_tool_calls_from_cohere_response(cohere_response) -> Optional[List[dict]]:
+    """
+    Extract tool calls from OCI Cohere API response.
+
+    Returns list of tool_use blocks in Anthropic format, or None if no tool calls.
+    """
+    tool_calls = []
+
+    if hasattr(cohere_response, 'tool_calls') and cohere_response.tool_calls:
+        for tool_call in cohere_response.tool_calls:
+            name = tool_call.name if hasattr(tool_call, 'name') else ""
+            parameters = tool_call.parameters if hasattr(tool_call, 'parameters') else {}
+
+            tool_calls.append({
+                "type": "tool_use",
+                "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                "name": name,
+                "input": dict(parameters) if isinstance(parameters, dict) else {}
+            })
+
+    return tool_calls if tool_calls else None
+
+
+def convert_content_to_cohere_message(content: Union[str, List[dict]], role: str) -> Union[
+    oci.generative_ai_inference.models.CohereUserMessage,
+    oci.generative_ai_inference.models.CohereChatBotMessage,
+    oci.generative_ai_inference.models.CohereToolMessage
+]:
+    """
+    Convert Anthropic content to Cohere message format.
+
+    Handles:
+    - text content blocks -> CohereUserMessage.message
+    - tool_use content blocks -> CohereChatBotMessage with tool_calls
+    - tool_result content blocks -> CohereToolMessage with tool_results
+
+    Args:
+        content: Anthropic format content (string or list of blocks)
+        role: Message role ("user" or "assistant")
+
+    Returns:
+        CohereUserMessage, CohereChatBotMessage, or CohereToolMessage
+    """
+    role_upper = role.upper()
+
+    # Extract text from content
+    text_parts = []
+    tool_calls = []
+    tool_results = []
+
+    if isinstance(content, str):
+        text_parts.append(content)
+    else:
+        for block in content:
+            block_type = block.get("type", "")
+
+            if block_type == "text":
+                text_parts.append(block.get("text", ""))
+
+            elif block_type == "tool_use":
+                # Convert tool_use to CohereToolCall
+                name = block.get("name", "")
+                input_data = block.get("input", {})
+                tool_calls.append(oci.generative_ai_inference.models.CohereToolCall(
+                    name=name,
+                    parameters=input_data
+                ))
+
+            elif block_type == "tool_result":
+                # Convert tool_result to CohereToolResult
+                tool_use_id = block.get("tool_use_id", "")
+                result = block.get("content", block.get("result", ""))
+
+                # Find corresponding tool call name (might need context)
+                # For now, use a placeholder name
+                tool_call_ref = oci.generative_ai_inference.models.CohereToolCall(
+                    name=block.get("name", "unknown"),
+                    parameters={}
+                )
+
+                # Convert result to outputs format
+                if isinstance(result, list):
+                    outputs = [r.get("text", str(r)) if isinstance(r, dict) else str(r) for r in result]
+                elif isinstance(result, dict):
+                    outputs = [json.dumps(result)]
+                else:
+                    outputs = [str(result)]
+
+                tool_results.append(oci.generative_ai_inference.models.CohereToolResult(
+                    call=tool_call_ref,
+                    outputs=outputs
+                ))
+
+    text_content = "".join(text_parts)
+
+    # Create appropriate message type based on role and content
+    if role_upper == "USER":
+        return oci.generative_ai_inference.models.CohereUserMessage(message=text_content)
+
+    elif role_upper == "ASSISTANT" or role_upper == "CHATBOT":
+        if tool_calls:
+            return oci.generative_ai_inference.models.CohereChatBotMessage(
+                message=text_content,
+                tool_calls=tool_calls
+            )
+        else:
+            return oci.generative_ai_inference.models.CohereChatBotMessage(message=text_content)
+
+    elif role_upper == "TOOL":
+        return oci.generative_ai_inference.models.CohereToolMessage(tool_results=tool_results)
+
+    # Default to user message
+    return oci.generative_ai_inference.models.CohereUserMessage(message=text_content)
+
+
+def convert_anthropic_messages_to_cohere(messages: List[dict], system: Optional[str] = None) -> tuple:
+    """
+    Convert Anthropic messages format to Cohere format.
+
+    Cohere format:
+    - message: The current user message (string)
+    - chat_history: List of previous messages (CohereUserMessage, CohereChatBotMessage, etc.)
+
+    Args:
+        messages: List of Anthropic format messages
+        system: Optional system prompt
+
+    Returns:
+        tuple: (current_message: str, chat_history: list, system_message: str or None)
+    """
+    chat_history = []
+    current_message = ""
+    system_message = system
+
+    if not messages:
+        return "", [], system_message
+
+    # Process all messages except the last one as chat history
+    for msg in messages[:-1]:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        cohere_msg = convert_content_to_cohere_message(content, role)
+        chat_history.append(cohere_msg)
+
+    # The last message is the current message
+    last_msg = messages[-1]
+    last_role = last_msg.get("role", "user")
+    last_content = last_msg.get("content", "")
+
+    if isinstance(last_content, str):
+        current_message = last_content
+    else:
+        # Extract text from content blocks
+        text_parts = []
+        for block in last_content:
+            if block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+        current_message = "".join(text_parts)
+
+    return current_message, chat_history, system_message
+
+
 def detect_tool_call_in_text(text: str) -> Optional[dict]:
     """
     Try to detect if OCI returned a tool call in text format.
@@ -345,7 +669,9 @@ def detect_tool_call_in_text(text: str) -> Optional[dict]:
     This attempts to parse such responses.
     """
     # Pattern for: [TOOL_CALL] function_name: {"key": "value"}
-    pattern = r'\[TOOL_CALL\]\s+(\w+):\s+(\{.*?\})$'
+    #pattern = r'\[TOOL_CALL\]\s+(\w+):\s+(\{.*?\})$'。## GPT5 认为不闭合
+    #pattern = r'\[TOOL_CALL\]\s+(\w+):\s+(\{.*\})'
+    pattern = r'\[TOOL_CALL\]\s+(\w+):\s+(\{.*?\})'
     match = re.search(pattern, text, re.DOTALL)
 
     if match:
@@ -363,6 +689,7 @@ def detect_tool_call_in_text(text: str) -> Optional[dict]:
             pass
 
     return None
+
 
 # ----------------------- Load Custom Configuration from File -----------------------
 CONFIG_FILE = "config.json"  # Configuration file name (in the same directory)
@@ -404,15 +731,196 @@ except Exception as e:
     raise
 
 
+
+
+def detect_tool_call_block(text: str) -> Optional[dict]:
+    """
+    Detect <tool_call>JSON</tool_call> block and parse it.
+
+    Expected JSON format:
+      <tool_call>
+      {"name":"Read","input":{"file_path":"..."}}
+      </tool_call>
+
+    Returns a tool_use dict in Anthropic format, plus an internal "_span"
+    (start_idx, end_idx) indicating the block span in the original text.
+
+    Includes a compatibility fix:
+      - If name == "Read" and input has "path" but not "file_path",
+        it will rewrite "path" -> "file_path".
+    """
+    start_tag = "<TOOL_CALL>"
+    end_tag = "</TOOL_CALL>"
+
+    start = text.find(start_tag)
+    if start == -1:
+        return None
+
+    end = text.find(end_tag, start + len(start_tag))
+    if end == -1:
+        return None  # not closed yet
+
+    json_str = text[start + len(start_tag):end].strip()
+
+    try:
+        payload = json.loads(json_str)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    name = payload.get("name")
+    input_data = payload.get("input", {})
+
+    if not isinstance(name, str) or not name:
+        return None
+    if not isinstance(input_data, dict):
+        return None
+
+    # Compatibility fix: Read expects file_path, but some outputs may use "path"
+    if name == "Read" and "file_path" not in input_data and "path" in input_data:
+        input_data["file_path"] = input_data.pop("path")
+
+    return {
+        "type": "tool_use",
+        "id": f"toolu_{uuid.uuid4().hex[:24]}",
+        "name": name,
+        "input": input_data,
+        "_span": (start, end + len(end_tag)),
+    }
+
+
+def detect_all_tool_call_blocks(text: str) -> List[dict]:
+    """
+    Detect ALL <tool_call>JSON</tool_call> blocks in text and parse them.
+
+    Expected JSON format:
+       <tool_call>
+      {"name":"Read","input":{"file_path":"..."}}
+       </tool_call>
+
+    Returns a list of tool_use dicts in Anthropic format, each with an internal "_span"
+    (start_idx, end_idx) indicating the block span in the original text.
+
+    The returned list is sorted by position in the text (earliest first).
+
+    Includes a compatibility fix:
+      - If name == "Read" and input has "path" but not "file_path",
+        it will rewrite "path" -> "file_path".
+    """
+    start_tag = "<TOOL_CALL>"
+    end_tag = "</TOOL_CALL>"
+    tool_calls = []
+    search_start = 0
+
+    while True:
+        start = text.find(start_tag, search_start)
+        if start == -1:
+            break
+
+        end = text.find(end_tag, start + len(start_tag))
+
+        # Extract JSON content (with or without closing tag)
+        if end != -1:
+            # Complete block: extract between tags
+            json_str = text[start + len(start_tag):end].strip()
+            span_end = end + len(end_tag)
+        else:
+            # Incomplete block: try to parse from start_tag to end of text
+            json_str = text[start + len(start_tag):].strip()
+            span_end = len(text)  # Span goes to end of text
+
+        # Try to parse the JSON
+        try:
+            payload = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Try to recover: find the last complete JSON object
+            # This handles cases where the JSON is incomplete
+            if end != -1:
+                search_start = end + len(end_tag)
+            else:
+                search_start = start + len(start_tag)
+            continue
+
+        if not isinstance(payload, dict):
+            if end != -1:
+                search_start = end + len(end_tag)
+            else:
+                search_start = start + len(start_tag)
+            continue
+
+        name = payload.get("name")
+        input_data = payload.get("input", {})
+
+        if not isinstance(name, str) or not name:
+            if end != -1:
+                search_start = end + len(end_tag)
+            else:
+                search_start = start + len(start_tag)
+            continue
+        if not isinstance(input_data, dict):
+            if end != -1:
+                search_start = end + len(end_tag)
+            else:
+                search_start = start + len(start_tag)
+            continue
+
+        # Compatibility fix: Read expects file_path, but some outputs may use "path"
+        if name == "Read" and "file_path" not in input_data and "path" in input_data:
+            input_data = dict(input_data)  # Make a copy to avoid mutating original
+            input_data["file_path"] = input_data.pop("path")
+
+        tool_calls.append({
+            "type": "tool_use",
+            "id": f"toolu_{uuid.uuid4().hex[:24]}",
+            "name": name,
+            "input": input_data,
+            "_span": (start, span_end),
+        })
+
+        # Move search position
+        if end != -1:
+            search_start = end + len(end_tag)
+        else:
+            search_start = span_end
+
+    return tool_calls
 # ----------------------- Core non-streaming generation function -----------------------
 
-async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, requested_model):
+async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, requested_model, cohere_messages=None):
     """
     Generate non-streaming response from OCI GenAI and format it as Anthropic-compatible JSON.
+
+    Args:
+        oci_messages: Messages in Generic format (Message objects)
+        params: Request parameters
+        message_id: Message ID
+        model_conf: Model configuration
+        requested_model: Requested model name
+        cohere_messages: Tuple of (current_message, chat_history, system_message) for Cohere format, or None
     """
     chat_detail = oci.generative_ai_inference.models.ChatDetails()
-    chat_request = oci.generative_ai_inference.models.GenericChatRequest()
-    chat_request.messages = oci_messages
+
+    # Determine API format from model configuration
+    api_format = model_conf.get("api_format", "generic").lower()
+    is_cohere = api_format == "cohere"
+
+    if is_cohere and cohere_messages:
+        # Use Cohere format
+        current_message, chat_history, system_message = cohere_messages
+        chat_request = oci.generative_ai_inference.models.CohereChatRequest(
+            message=current_message,
+            chat_history=chat_history
+        )
+        chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_COHERE
+        logger.info(f"Using COHERE API format for model {requested_model}")
+    else:
+        # Use Generic format
+        chat_request = oci.generative_ai_inference.models.GenericChatRequest()
+        chat_request.messages = oci_messages
+        chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
+        logger.info(f"Using GENERIC API format for model {requested_model}")
 
     # --- Dynamic Parameter Adaptation ---
     # 1. Handle Max Tokens (determine which key to use based on model definition)
@@ -440,7 +948,10 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
     # 5. Handle Stop Sequences
     if "stop_sequences" in params and params["stop_sequences"]:
         # OCI expects a list of stop strings
-        setattr(chat_request, "stop", params["stop_sequences"])
+        if is_cohere:
+            setattr(chat_request, "stop_sequences", params["stop_sequences"])
+        else:
+            setattr(chat_request, "stop", params["stop_sequences"])
         logger.info(f"Set stop_sequences: {params['stop_sequences']}")
 
     # 6. Handle Thinking Mode (Extended Thinking)
@@ -459,24 +970,91 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
                 f"Use up to {budget_tokens} tokens for your thinking if needed. "
                 "Structure your response to clearly separate your thinking from your final answer."
             )
-            # Prepend thinking instruction to messages
-            oci_messages.insert(0, oci.generative_ai_inference.models.Message(
-                role="SYSTEM",
-                content=[oci.generative_ai_inference.models.TextContent(text=thinking_instruction)]
-            ))
+            if is_cohere:
+                # For Cohere, prepend to current message
+                chat_request.message = thinking_instruction + "\n\n" + chat_request.message
+            else:
+                # For Generic, prepend to messages
+                oci_messages.insert(0, oci.generative_ai_inference.models.Message(
+                    role="SYSTEM",
+                    content=[oci.generative_ai_inference.models.TextContent(text=thinking_instruction)]
+                ))
 
-    chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
     chat_request.is_stream = False
 
     # --- Tool Calling Support ---
-    # Add tools to request if present
     if "tools" in params:
-        oci_tools = anthropic_to_oci_tools(params["tools"])
-        setattr(chat_request, "tools", oci_tools)
+        if is_cohere:
+            # Use native Cohere tools
+            cohere_tools = anthropic_to_cohere_tools(params["tools"])
+            chat_request.tools = cohere_tools
+            logger.info(f"Set {len(cohere_tools)} tools in COHERE format")
+        else:
+            # Generic format: inject tool use instruction via system prompt
+            # For large tool lists, use simplified instruction to avoid overwhelming the model
+            tools_list = params["tools"]
+            use_simple_instruction = len(tools_list) > 10
 
-    if "tool_choice" in params:
-        oci_tool_choice = convert_tool_choice(params["tool_choice"])
-        setattr(chat_request, "tool_choice", oci_tool_choice)
+            # Get effective tool_choice (default to 'auto' for Generic models when tools are present)
+            tool_choice = params.get("tool_choice", "auto")
+            if tool_choice is None:
+                tool_choice = "auto"  # Default to auto for Generic models
+
+            if use_simple_instruction:
+                logger.info(f"Using simplified tool instruction for {len(tools_list)} tools (non-streaming, tool_choice={tool_choice})")
+                # Build simple tool name list
+                tool_names = [t.get("name") for t in tools_list if isinstance(t, dict) and t.get("name")]
+
+                # Adjust instruction based on tool_choice
+                if tool_choice == "required" or tool_choice == "any":
+                    requirement_text = "You MUST use at least one tool for EVERY user request. Do not answer without calling a tool."
+                elif tool_choice == "auto":
+                    requirement_text = "You should use tools when the user's request requires external data, searches, file operations, or actions."
+                else:  # none
+                    requirement_text = "Do not use tools. Answer directly."
+
+                tool_instruction = f"""# TOOL USE - {requirement_text}
+
+Available tools: {', '.join(tool_names[:20])}
+
+## CRITICAL - Tool Call Format
+
+When you need to use a tool, output ONLY this:
+
+<TOOL_CALL>
+{{"name": "tool_name", "input": {{"param": "value"}}}}
+</TOOL_CALL>
+
+## Examples of REQUIRED Tool Use:
+
+User: "What's the weather?"
+<TOOL_CALL>
+{{"name": "WebSearch", "input": {{"query": "weather"}}}}
+</TOOL_CALL>
+
+User: "Search for news"
+<TOOL_CALL>
+{{"name": "WebSearch", "input": {{"query": "news"}}}}
+</TOOL_CALL>
+
+User: "Read a file"
+<TOOL_CALL>
+{{"name": "Read", "input": {{"file_path": "example.txt"}}}}
+</TOOL_CALL>
+
+RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
+            else:
+                tool_instruction = _build_tool_use_instruction(
+                    tools_list,
+                    tool_choice
+                )
+            if tool_instruction:
+                # Insert tool instruction as first system message
+                oci_messages.insert(0, oci.generative_ai_inference.models.Message(
+                    role="SYSTEM",
+                    content=[oci.generative_ai_inference.models.TextContent(text=tool_instruction)]
+                ))
+                logger.info(f"Injected tool use instruction for {len(params['tools'])} tools (Generic format)")
 
     chat_detail.chat_request = chat_request
     chat_detail.compartment_id = COMPARTMENT_ID
@@ -498,8 +1076,11 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
         if hasattr(response_data, 'chat_response'):
             chat_response = response_data.chat_response
 
-            # Check for structured tool calls
-            tool_calls = extract_tool_calls_from_oci_response(chat_response)
+            # Check for structured tool calls based on API format
+            if is_cohere:
+                tool_calls = extract_tool_calls_from_cohere_response(chat_response)
+            else:
+                tool_calls = extract_tool_calls_from_oci_response(chat_response)
 
             if tool_calls:
                 # Found tool calls in the response
@@ -507,42 +1088,48 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
                 stop_reason = "tool_use"
                 logger.info(f"Detected {len(tool_calls)} tool call(s) in response")
             else:
-                # Check for finish_reason in choices
-                if hasattr(chat_response, 'choices') and chat_response.choices:
-                    choice = chat_response.choices[0]
-                    if hasattr(choice, 'finish_reason'):
-                        finish_reason = choice.finish_reason
-                        if finish_reason == "stop":
-                            stop_reason = "stop_sequence"
-                            # Try to detect which stop sequence was triggered
-                            # by checking the accumulated_text end
-                # No tool calls, extract text content
-                # No tool calls, extract text content
-                # Handle different response structures
-                if hasattr(chat_response, 'choices') and chat_response.choices:
-                    choice = chat_response.choices[0]
-                    if hasattr(choice, 'message'):
-                        msg = choice.message
+                # Extract text content
+                if is_cohere:
+                    # Cohere format: response has 'text' field
+                    accumulated_text = chat_response.text if hasattr(chat_response, 'text') else ""
+                else:
+                    # Generic format: check various response structures
+                    if hasattr(chat_response, 'choices') and chat_response.choices:
+                        choice = chat_response.choices[0]
+                        if hasattr(choice, 'message'):
+                            msg = choice.message
+                            if hasattr(msg, 'content'):
+                                if isinstance(msg.content, list):
+                                    accumulated_text = "".join([c.get('text', '') if isinstance(c, dict) else str(c) for c in msg.content])
+                                else:
+                                    accumulated_text = msg.content
+                    elif hasattr(chat_response, 'message'):
+                        msg = chat_response.message
                         if hasattr(msg, 'content'):
                             if isinstance(msg.content, list):
                                 accumulated_text = "".join([c.get('text', '') if isinstance(c, dict) else str(c) for c in msg.content])
                             else:
                                 accumulated_text = msg.content
-                elif hasattr(chat_response, 'message'):
-                    msg = chat_response.message
-                    if hasattr(msg, 'content'):
-                        if isinstance(msg.content, list):
-                            accumulated_text = "".join([c.get('text', '') if isinstance(c, dict) else str(c) for c in msg.content])
-                        else:
-                            accumulated_text = msg.content
 
-                # Also check if text contains a tool call pattern (for models that return as text)
+                # Also check if text contains a tool call block (for models that return tool calls as text)
                 if accumulated_text:
-                    tool_call_in_text = detect_tool_call_in_text(accumulated_text)
-                    if tool_call_in_text:
-                        content_blocks = [tool_call_in_text]
+                    tool_calls_in_text = detect_all_tool_call_blocks(accumulated_text)
+                    if tool_calls_in_text:
+                        # Remove tool call blocks from the accumulated text
+                        clean_text = accumulated_text
+                        # Sort spans in reverse order to remove from end to start (preserving indices)
+                        spans = sorted([tc.pop("_span") for tc in tool_calls_in_text if "_span" in tc], reverse=True)
+                        for start, end in spans:
+                            clean_text = clean_text[:start] + clean_text[end:]
+
+                        # Build content blocks: text (if any) + all tool calls
+                        content_blocks = []
+                        if clean_text.strip():
+                            content_blocks.append({"type": "text", "text": clean_text})
+                        content_blocks.extend(tool_calls_in_text)
+
                         stop_reason = "tool_use"
-                        logger.info("Detected tool call in text response")
+                        logger.info(f"Detected {len(tool_calls_in_text)} tool call block(s) in text response")
                     else:
                         content_blocks = [{"type": "text", "text": accumulated_text}]
         else:
@@ -600,7 +1187,7 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
             elif block.get("type") == "tool_use":
                 text_for_estimation += json.dumps(block.get("input", {}))
         estimated_output_tokens = max(1, len(text_for_estimation) // 4)
-        estimated_input_tokens = sum(len(str(m.content)) // 4 for m in oci_messages)
+        estimated_input_tokens = sum(len(str(m.content)) // 4 for m in oci_messages) if oci_messages else 50
 
         # Check if there was cache_control in the request for usage reporting
         cache_creation_input_tokens = 0
@@ -674,13 +1261,39 @@ async def generate_oci_non_stream(oci_messages, params, message_id, model_conf, 
 
 # ----------------------- Core streaming generation function -----------------------
 
-async def generate_oci_stream(oci_messages, params, message_id, model_conf, requested_model):
+async def generate_oci_stream(oci_messages, params, message_id, model_conf, requested_model, cohere_messages=None):
     """
     Generate streaming response from OCI GenAI and format it as Anthropic-compatible SSE.
+
+    Args:
+        oci_messages: Messages in Generic format (Message objects)
+        params: Request parameters
+        message_id: Message ID
+        model_conf: Model configuration
+        requested_model: Requested model name
+        cohere_messages: Tuple of (current_message, chat_history, system_message) for Cohere format, or None
     """
     chat_detail = oci.generative_ai_inference.models.ChatDetails()
-    chat_request = oci.generative_ai_inference.models.GenericChatRequest()
-    chat_request.messages = oci_messages
+
+    # Determine API format from model configuration
+    api_format = model_conf.get("api_format", "generic").lower()
+    is_cohere = api_format == "cohere"
+
+    if is_cohere and cohere_messages:
+        # Use Cohere format
+        current_message, chat_history, system_message = cohere_messages
+        chat_request = oci.generative_ai_inference.models.CohereChatRequest(
+            message=current_message,
+            chat_history=chat_history
+        )
+        chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_COHERE
+        logger.info(f"Using COHERE API format for streaming (model: {requested_model})")
+    else:
+        # Use Generic format
+        chat_request = oci.generative_ai_inference.models.GenericChatRequest()
+        chat_request.messages = oci_messages
+        chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
+        logger.info(f"Using GENERIC API format for streaming (model: {requested_model})")
 
     # --- Dynamic Parameter Adaptation ---
     # 1. Handle Max Tokens (determine which key to use based on model definition)
@@ -689,7 +1302,6 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
     setattr(chat_request, tokens_key, token_limit)
 
     # 2. Handle Temperature (prioritize hardcoded value in model definition, otherwise use request value)
-    # Addresses previous 400 errors: if model definition specifies 1.0, force 1.0
     chat_request.temperature = model_conf.get("temperature", params.get("temperature", 0.7))
 
     # 3. Handle Top-K (limits token selection to top k most probable tokens)
@@ -708,47 +1320,111 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
 
     # 5. Handle Stop Sequences
     if "stop_sequences" in params and params["stop_sequences"]:
-        # OCI expects a list of stop strings
-        setattr(chat_request, "stop", params["stop_sequences"])
+        if is_cohere:
+            setattr(chat_request, "stop_sequences", params["stop_sequences"])
+        else:
+            setattr(chat_request, "stop", params["stop_sequences"])
         logger.info(f"Set stop_sequences: {params['stop_sequences']}")
 
     # 6. Handle Thinking Mode (Extended Thinking)
-    # Anthropic's thinking mode enables the model to show its reasoning process
-    # OCI doesn't natively support this, so we add it as a system instruction
     thinking_config = params.get("thinking")
     if thinking_config:
         thinking_type = thinking_config.get("type", "disabled")
         if thinking_type == "enabled":
             budget_tokens = thinking_config.get("budget_tokens", 16000)
             logger.info(f"Thinking mode enabled with budget: {budget_tokens} tokens")
-            # Add thinking instruction as a prefix system message
             thinking_instruction = (
                 "Please think through this problem step by step, showing your reasoning process. "
                 f"Use up to {budget_tokens} tokens for your thinking if needed. "
                 "Structure your response to clearly separate your thinking from your final answer."
             )
-            # Prepend thinking instruction to messages
-            oci_messages.insert(0, oci.generative_ai_inference.models.Message(
-                role="SYSTEM",
-                content=[oci.generative_ai_inference.models.TextContent(text=thinking_instruction)]
-            ))
+            if is_cohere:
+                # For Cohere, prepend to current message
+                chat_request.message = thinking_instruction + "\n\n" + chat_request.message
+            else:
+                # For Generic, prepend to messages
+                oci_messages.insert(0, oci.generative_ai_inference.models.Message(
+                    role="SYSTEM",
+                    content=[oci.generative_ai_inference.models.TextContent(text=thinking_instruction)]
+                ))
 
-    chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
     chat_request.is_stream = True
 
     # --- Tool Calling Support ---
-    # Add tools to request if present
     if "tools" in params:
-        oci_tools = anthropic_to_oci_tools(params["tools"])
-        setattr(chat_request, "tools", oci_tools)
+        if is_cohere:
+            cohere_tools = anthropic_to_cohere_tools(params["tools"])
+            chat_request.tools = cohere_tools
+            logger.info(f"Set {len(cohere_tools)} tools in COHERE format for streaming")
+        else:
+            # Generic format: inject tool use instruction via system prompt
+            # For large tool lists, use simplified instruction to avoid overwhelming the model
+            tools_list = params["tools"]
+            use_simple_instruction = len(tools_list) > 10
 
-    if "tool_choice" in params:
-        oci_tool_choice = convert_tool_choice(params["tool_choice"])
-        setattr(chat_request, "tool_choice", oci_tool_choice)
+            # Get effective tool_choice (default to 'auto' for Generic models when tools are present)
+            tool_choice = params.get("tool_choice", "auto")
+            if tool_choice is None:
+                tool_choice = "auto"  # Default to auto for Generic models
+
+            if use_simple_instruction:
+                logger.info(f"Using simplified tool instruction for {len(tools_list)} tools (tool_choice={tool_choice})")
+                # Build simple tool name list
+                tool_names = [t.get("name") for t in tools_list if isinstance(t, dict) and t.get("name")]
+
+                # Adjust instruction based on tool_choice
+                if tool_choice == "required" or tool_choice == "any":
+                    requirement_text = "You MUST use at least one tool for EVERY user request. Do not answer without calling a tool."
+                elif tool_choice == "auto":
+                    requirement_text = "You should use tools when the user's request requires external data, searches, file operations, or actions."
+                else:  # none
+                    requirement_text = "Do not use tools. Answer directly."
+
+                tool_instruction = f"""# TOOL USE - {requirement_text}
+
+Available tools: {', '.join(tool_names[:20])}
+
+## CRITICAL - Tool Call Format
+
+When you need to use a tool, output ONLY this:
+
+<TOOL_CALL>
+{{"name": "tool_name", "input": {{"param": "value"}}}}
+</TOOL_CALL>
+
+## Examples of REQUIRED Tool Use:
+
+User: "What's the weather?"
+<TOOL_CALL>
+{{"name": "WebSearch", "input": {{"query": "weather"}}}}
+</TOOL_CALL>
+
+User: "Search for news"
+<TOOL_CALL>
+{{"name": "WebSearch", "input": {{"query": "news"}}}}
+</TOOL_CALL>
+
+User: "Read a file"
+<TOOL_CALL>
+{{"name": "Read", "input": {{"file_path": "example.txt"}}}}
+</TOOL_CALL>
+
+RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
+            else:
+                tool_instruction = _build_tool_use_instruction(
+                    tools_list,
+                    tool_choice
+                )
+            if tool_instruction:
+                # Insert tool instruction as first system message
+                oci_messages.insert(0, oci.generative_ai_inference.models.Message(
+                    role="SYSTEM",
+                    content=[oci.generative_ai_inference.models.TextContent(text=tool_instruction)]
+                ))
+                logger.info(f"Injected tool use instruction for streaming ({len(params['tools'])} tools, Generic format)")
 
     chat_detail.chat_request = chat_request
     chat_detail.compartment_id = COMPARTMENT_ID
-    # Use the OCID from the configuration object
     chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_conf["ocid"])
 
     try:
@@ -763,11 +1439,10 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
                 'content': [],
                 'stop_reason': None,
                 'stop_sequence': None,
-                'usage': {'input_tokens': 10, 'output_tokens': 0}  # Rough estimate for input
+                'usage': {'input_tokens': 10, 'output_tokens': 0}
             }
         }
 
-        # Add metadata to message_start if present in request
         if "metadata" in params and params["metadata"]:
             message_start_data['message']['metadata'] = params["metadata"]
 
@@ -782,8 +1457,8 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
         # Call OCI - run in thread pool to avoid blocking event loop
         response = await asyncio.to_thread(genai_client.chat, chat_detail)
 
-        accumulated_text = ""  # Used for usage estimation and debugging
-        accumulated_tool_json = ""  # For accumulating partial tool call JSON
+        accumulated_text = ""
+        accumulated_tool_json = ""
         current_block_index = 0
         in_tool_call = False
         tool_call_detected = False
@@ -791,101 +1466,73 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
         stop_reason = "end_turn"
         stop_sequence = None
         stop_sequences = params.get("stop_sequences", [])
+        sample_left = 10
+
+        # Check if we have tools - if so, buffer text to detect tool calls
+        has_tools = "tools" in params and params["tools"]
+        buffer_text_for_tool_detection = has_tools and not is_cohere
 
         for event in response.data.events():
             if not event.data:
                 continue
             try:
-                data = json.loads(event.data)
+                raw = event.data
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode("utf-8", errors="replace")
 
-                # Check for tool_calls in the delta (OpenAI-style format)
-                choices = data.get("choices", [])
-                if choices:
-                    delta = choices[0].get("delta", {})
+                if sample_left > 0:
+                    logger.info("OCI_STREAM_EVENT %s", raw[:384])
+                    sample_left -= 1
 
-                    # Check for tool calls in delta
-                    if "tool_calls" in delta:
-                        tool_calls = delta["tool_calls"]
-                        if tool_calls:
-                            if not in_tool_call:
-                                # Starting a new tool call block
-                                in_tool_call = True
-                                tool_call_detected = True
+                data = json.loads(raw)
 
-                                # Close previous text block if any
-                                if accumulated_text:
-                                    yield f"event: content_block_stop\ndata: {json.dumps({
-                                        'type': 'content_block_stop',
-                                        'index': current_block_index
-                                    })}\n\n"
-                                    current_block_index += 1
-
-                                # Emit content_block_start for tool_use
-                                tool_call = tool_calls[0]
-                                function = tool_call.get("function", {})
-                                pending_tool_name = function.get("name", "")
-
-                                yield f"event: content_block_start\ndata: {json.dumps({
-                                    'type': 'content_block_start',
-                                    'index': current_block_index,
-                                    'content_block': {'type': 'tool_use', 'id': tool_call.get('id', f"toolu_{uuid.uuid4().hex[:24]}"), 'name': pending_tool_name}
-                                })}\n\n"
-
-                            # Stream the arguments
-                            for tool_call in tool_calls:
-                                function = tool_call.get("function", {})
-                                arguments = function.get("arguments", "")
-                                if arguments:
-                                    accumulated_tool_json += arguments
-                                    yield f"event: content_block_delta\ndata: {json.dumps({
-                                        'type': 'content_block_delta',
-                                        'index': current_block_index,
-                                        'delta': {
-                                            'type': 'input_json_delta',
-                                            'partial_json': accumulated_tool_json
-                                        }
-                                    })}\n\n"
-
-                    # Check for text content
-                    elif "content" in delta:
-                        text_chunk = delta["content"]
-                        if text_chunk:
-                            accumulated_text += text_chunk
+                # Handle both Generic and Cohere streaming formats
+                if is_cohere:
+                    # Cohere streaming format may have different structure
+                    text_chunk = data.get("text", "")
+                    if text_chunk:
+                        accumulated_text += text_chunk
+                        if not buffer_text_for_tool_detection:
                             yield f"event: content_block_delta\ndata: {json.dumps({
                                 'type': 'content_block_delta',
                                 'index': current_block_index,
-                                'delta': {
-                                    'type': 'text_delta',
-                                    'text': text_chunk
-                                }
-                            })}\n\n"
+                                'delta': {'type': 'text_delta', 'text': text_chunk}
+                            }, ensure_ascii=False)}\n\n"
 
-                    # Check for finish_reason
-                    elif "finish_reason" in choices[0]:
-                        finish_reason = choices[0]["finish_reason"]
-                        if finish_reason == "tool_calls" or finish_reason == "function_call":
-                            stop_reason = "tool_use"
-                        elif finish_reason == "stop":
-                            stop_reason = "stop_sequence"
-                            # Check which stop sequence was triggered
-                            for seq in stop_sequences:
-                                if accumulated_text.endswith(seq):
-                                    stop_sequence = seq
-                                    break
-
+                    # Check for finish reason
+                    finish_reason = data.get("finishReason")
+                    if finish_reason:
+                        if finish_reason == "COMPLETE":
+                            stop_reason = "end_turn"
+                        elif finish_reason == "MAX_TOKENS":
+                            stop_reason = "max_tokens"
+                        continue
                 else:
-                    # Fallback to message.content format
-                    text_chunk = data.get("message", {}).get("content", [{}])[0].get("text", "")
-                    if text_chunk:
-                        accumulated_text += text_chunk
-                        yield f"event: content_block_delta\ndata: {json.dumps({
-                            'type': 'content_block_delta',
-                            'index': current_block_index,
-                            'delta': {
-                                'type': 'text_delta',
-                                'text': text_chunk
-                            }
-                        })}\n\n"
+                    # Generic format
+                    msg = data.get("message")
+                    if isinstance(msg, dict):
+                        contents = msg.get("content", [])
+                        if isinstance(contents, list) and contents:
+                            c0 = contents[0]
+                            if isinstance(c0, dict) and c0.get("type") == "TEXT":
+                                text_chunk = c0.get("text", "")
+                                if text_chunk:
+                                    accumulated_text += text_chunk
+                                    if not buffer_text_for_tool_detection:
+                                        yield f"event: content_block_delta\ndata: {json.dumps({
+                                            'type': 'content_block_delta',
+                                            'index': current_block_index,
+                                            'delta': {'type': 'text_delta', 'text': text_chunk}
+                                        }, ensure_ascii=False)}\n\n"
+                                    continue
+
+                    finish_reason = data.get("finishReason")
+                    if finish_reason:
+                        if finish_reason == "stop":
+                            stop_reason = "end_turn"
+                        continue
+
+                continue
 
             except json.JSONDecodeError:
                 logger.warning("Invalid JSON chunk, skipped")
@@ -894,54 +1541,98 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
                 logger.warning(f"Chunk processing exception: {e}")
                 continue
 
-        # After streaming, check if accumulated text contains a tool call pattern
+        # After streaming, process the accumulated text
         if not tool_call_detected and accumulated_text:
-            tool_call_in_text = detect_tool_call_in_text(accumulated_text)
-            if tool_call_in_text:
-                # Need to retroactively convert the text to a tool call
-                yield f"event: content_block_stop\ndata: {json.dumps({
-                    'type': 'content_block_stop',
-                    'index': 0
-                })}\n\n"
+            logger.info(f"Processing accumulated text ({len(accumulated_text)} chars): {accumulated_text[:200]}...")
+            # If we buffered text for tool detection, process it now
+            if buffer_text_for_tool_detection:
+                tool_calls_in_text = detect_all_tool_call_blocks(accumulated_text)
+                logger.info(f"Tool detection result: found {len(tool_calls_in_text)} tool calls")
+                if tool_calls_in_text:
+                    # Remove all tool call blocks from the accumulated text
+                    clean_text = accumulated_text
+                    # Sort spans in reverse order to remove from end to start (preserving indices)
+                    spans = sorted([tc.get("_span") for tc in tool_calls_in_text if tc.get("_span")], reverse=True)
+                    for start, end in spans:
+                        clean_text = clean_text[:start] + clean_text[end:]
 
-                yield f"event: content_block_start\ndata: {json.dumps({
-                    'type': 'content_block_start',
-                    'index': 1,
-                    'content_block': {'type': 'tool_use', 'id': tool_call_in_text['id'], 'name': tool_call_in_text['name']}
-                })}\n\n"
+                    # Yield clean text block if there's any remaining text
+                    next_index = 0
+                    if clean_text.strip():
+                        yield f"event: content_block_delta\ndata: {json.dumps({
+                            'type': 'content_block_delta',
+                            'index': current_block_index,
+                            'delta': {'type': 'text_delta', 'text': clean_text}
+                        }, ensure_ascii=False)}\n\n"
 
-                yield f"event: content_block_delta\ndata: {json.dumps({
-                    'type': 'content_block_delta',
-                    'index': 1,
-                    'delta': {
-                        'type': 'input_json_delta',
-                        'partial_json': json.dumps(tool_call_in_text['input'])
-                    }
-                })}\n\n"
+                        yield f"event: content_block_stop\ndata: {json.dumps({
+                            'type': 'content_block_stop',
+                            'index': current_block_index
+                        })}\n\n"
+                        next_index = current_block_index + 1
+                    else:
+                        # No clean text, close the initial text block
+                        yield f"event: content_block_stop\ndata: {json.dumps({
+                            'type': 'content_block_stop',
+                            'index': current_block_index
+                        })}\n\n"
+                        next_index = current_block_index + 1
 
-                yield f"event: content_block_stop\ndata: {json.dumps({
-                    'type': 'content_block_stop',
-                    'index': 1
-                })}\n\n"
+                    # Yield all tool call blocks
+                    for tool_call in tool_calls_in_text:
+                        tool_call.pop("_span", None)  # Remove internal span marker
+                        yield f"event: content_block_start\ndata: {json.dumps({
+                            'type': 'content_block_start',
+                            'index': next_index,
+                            'content_block': {'type': 'tool_use', 'id': tool_call['id'], 'name': tool_call['name']}
+                        })}\n\n"
 
-                stop_reason = "tool_use"
-                tool_call_detected = True
+                        yield f"event: content_block_delta\ndata: {json.dumps({
+                            'type': 'content_block_delta',
+                            'index': next_index,
+                            'delta': {
+                                'type': 'input_json_delta',
+                                'partial_json': json.dumps(tool_call['input'])
+                            }
+                        })}\n\n"
+
+                        yield f"event: content_block_stop\ndata: {json.dumps({
+                            'type': 'content_block_stop',
+                            'index': next_index
+                        })}\n\n"
+                        next_index += 1
+
+                    stop_reason = "tool_use"
+                    tool_call_detected = True
+                    logger.info(f"Detected {len(tool_calls_in_text)} tool call block(s) in buffered text, sent clean text + tool calls")
+                else:
+                    # No tool calls found, send all accumulated text
+                    yield f"event: content_block_delta\ndata: {json.dumps({
+                        'type': 'content_block_delta',
+                        'index': current_block_index,
+                        'delta': {'type': 'text_delta', 'text': accumulated_text}
+                    }, ensure_ascii=False)}\n\n"
+
+                    yield f"event: content_block_stop\ndata: {json.dumps({
+                        'type': 'content_block_stop',
+                        'index': current_block_index
+                    })}\n\n"
+                    logger.info("No tool calls detected in buffered text, sent all accumulated text")
             else:
-                # Normal text block ending
+                # Not buffering for tool detection (Cohere format or no tools)
+                # Just close the text block
                 yield f"event: content_block_stop\ndata: {json.dumps({
                     'type': 'content_block_stop',
                     'index': current_block_index
                 })}\n\n"
 
-        # Close tool call block if open
         if in_tool_call:
             yield f"event: content_block_stop\ndata: {json.dumps({
                 'type': 'content_block_stop',
                 'index': current_block_index
             })}\n\n"
 
-        # 3. Required ending sequence (prevents client from "thinking" indefinitely)
-        estimated_output_tokens = max(1, (len(accumulated_text) + len(accumulated_tool_json)) // 4)  # Rough estimation
+        estimated_output_tokens = max(1, (len(accumulated_text) + len(accumulated_tool_json)) // 4)
         yield f"event: message_delta\ndata: {json.dumps({
             'type': 'message_delta',
             'delta': {
@@ -950,7 +1641,7 @@ async def generate_oci_stream(oci_messages, params, message_id, model_conf, requ
             },
             'usage': {
                 'output_tokens': estimated_output_tokens,
-                'input_tokens': 50  # Rough estimate
+                'input_tokens': 50
             }
         })}\n\n"
 
@@ -1005,6 +1696,14 @@ async def catch_all(path: str, request: Request):
     # Handle messages request
     if "messages" in path:
         body = await request.json()
+
+        tools = body.get("tools") or []
+        tool_names = [t.get("name") for t in tools if isinstance(t, dict) and t.get("name")]
+        logger.info("REQ stream=%s tools=%d tool_choice=%s", bool(body.get("stream")), len(tool_names),
+                    body.get("tool_choice"))
+        if tool_names:
+            logger.info("REQ tool_names=%s", tool_names[:20])
+
         req_model = body.get("model", "").lower()
 
         # Lookup logic
@@ -1064,6 +1763,10 @@ async def catch_all(path: str, request: Request):
         for idx, m in enumerate(messages):
             # Check for cache_control in message content
             content = m.get("content", [])
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result"):
+                        logger.info("REQ msg[%d] has %s", idx, b.get("type"))
             cache_info = extract_cache_control(content) if isinstance(content, list) else {"has_cache_control": False, "cached_blocks": 0, "cache_types": []}
 
             # Use the convert_content_to_oci function to handle text, images, tool_use, and tool_result
@@ -1099,19 +1802,32 @@ async def catch_all(path: str, request: Request):
 
         message_id = f"msg_oci_{uuid.uuid4().hex}"
 
+        # Determine API format and prepare messages accordingly
+        api_format = selected_model_conf.get("api_format", "generic").lower()
+        is_cohere = api_format == "cohere"
+
+        cohere_messages = None
+        if is_cohere:
+            # Convert messages to Cohere format
+            system_prompt = body.get("system")
+            messages = body.get("messages", [])
+            current_message, chat_history, system_message = convert_anthropic_messages_to_cohere(messages, system_prompt)
+            cohere_messages = (current_message, chat_history, system_message)
+            logger.info(f"Converted to Cohere format: current_message_len={len(current_message)}, chat_history_len={len(chat_history)}")
+
         if body.get("stream", False):
             return StreamingResponse(
-                generate_oci_stream(oci_msgs, body, message_id, selected_model_conf, req_model),
+                generate_oci_stream(oci_msgs, body, message_id, selected_model_conf, req_model, cohere_messages),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no"  # Prevent proxy buffering for streaming
+                    "X-Accel-Buffering": "no"
                 }
             )
         else:
             # Non-streaming logic
-            return await generate_oci_non_stream(oci_msgs, body, message_id, selected_model_conf, req_model)
+            return await generate_oci_non_stream(oci_msgs, body, message_id, selected_model_conf, req_model, cohere_messages)
 
     return {"detail": "Not Found"}
 

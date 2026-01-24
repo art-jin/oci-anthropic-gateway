@@ -1,5 +1,7 @@
 # OCI-Anthropic 网关
 
+English | [中文文档](README_CN.md)
+
 一个生产就绪的转换层，使 OCI GenAI 模型能够无缝兼容 Anthropic 的 API 格式，包括全面的工具调用支持。
 
 ## 概述

@@ -1,5 +1,7 @@
 # OCI-Anthropic Gateway
 
+[中文文档](README_CN.md) | English
+
 A production-ready translation layer that enables OCI GenAI models to work seamlessly with Anthropic's API format, including comprehensive tool calling support.
 
 ## Overview

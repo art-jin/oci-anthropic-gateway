@@ -121,7 +121,7 @@ def _build_tool_use_instruction(tools: list, tool_choice: str) -> str:
             logger.warning(f"Tool missing 'name' field: {tool}")
             continue
 
-        # Build parameter descriptions
+        # Build parameter descriptions with examples
         params_desc = []
         required = schema.get("required", [])
         properties = schema.get("properties", {})
@@ -131,7 +131,19 @@ def _build_tool_use_instruction(tools: list, tool_choice: str) -> str:
                 req_mark = "**(required)**" if param in required else "(optional)"
                 param_desc = info.get('description', '')
                 param_type = info.get('type', 'string')
-                params_desc.append(f"  - `{param}` {req_mark} ({param_type}): {param_desc}")
+                
+                # Add type-specific examples for complex parameters
+                example_hint = ""
+                if param_type == 'array':
+                    items_type = info.get('items', {}).get('type', 'object')
+                    if items_type == 'object':
+                        example_hint = " [array of objects]"
+                    else:
+                        example_hint = f" [array of {items_type}]"
+                elif param_type == 'object':
+                    example_hint = " [object with properties]"
+                
+                params_desc.append(f"  - `{param}` {req_mark} ({param_type}{example_hint}): {param_desc}")
 
         params_str = "\n".join(params_desc) if params_desc else "  (no parameters)"
 
@@ -192,6 +204,24 @@ Your response:
 {"name": "get_time", "input": {}}
 </TOOL_CALL>
 
+**Example 6 - Tool with array of objects parameter (TodoWrite):**
+User: "Create a todo list with tasks: finish report, review code"
+
+Your response:
+<TOOL_CALL>
+{"name": "TodoWrite", "input": {"todos": [{"content": "finish report", "status": "pending", "activeForm": "sessionTrackerTasks"}, {"content": "review code", "status": "pending", "activeForm": "sessionTrackerTasks"}]}}
+</TOOL_CALL>
+
+Note: TodoWrite requires each todo object to have: content, status, and activeForm fields.
+
+**Example 7 - Tool with nested object structure:**
+User: "Add user preferences for dark mode and email notifications"
+
+Your response:
+<TOOL_CALL>
+{"name": "update_preferences", "input": {"settings": {"theme": "dark", "notifications": {"email": true, "push": false}}}}
+</TOOL_CALL>
+
 ## COMMON MISTAKES TO AVOID
 
 ❌ WRONG - Including explanatory text with tool calls:
@@ -223,6 +253,36 @@ Let me know if you need anything else!"
 ✓ CORRECT - Complete tag structure:
 <TOOL_CALL>
 {"name": "search", "input": {"query": "test"}}
+</TOOL_CALL>
+
+❌ WRONG - Using wrong parameter name for array (e.g., "content" instead of "todos"):
+<TOOL_CALL>
+{"name": "TodoWrite", "input": {"content": "Task description"}}
+</TOOL_CALL>
+
+✓ CORRECT - Using correct array parameter with all required fields:
+<TOOL_CALL>
+{"name": "TodoWrite", "input": {"todos": [{"content": "Task description", "status": "pending", "activeForm": "sessionTrackerTasks"}]}}
+</TOOL_CALL>
+
+❌ WRONG - Passing string when array is required:
+<TOOL_CALL>
+{"name": "TodoWrite", "input": {"todos": "Task 1, Task 2"}}
+</TOOL_CALL>
+
+✓ CORRECT - Passing proper array structure with all required fields:
+<TOOL_CALL>
+{"name": "TodoWrite", "input": {"todos": [{"content": "Task 1", "status": "pending", "activeForm": "sessionTrackerTasks"}, {"content": "Task 2", "status": "pending", "activeForm": "sessionTrackerTasks"}]}}
+</TOOL_CALL>
+
+❌ WRONG - Missing required fields (activeForm) in todo objects:
+<TOOL_CALL>
+{"name": "TodoWrite", "input": {"todos": [{"content": "Task 1", "status": "pending"}]}}
+</TOOL_CALL>
+
+✓ CORRECT - All required fields included (content, status, activeForm):
+<TOOL_CALL>
+{"name": "TodoWrite", "input": {"todos": [{"content": "Task 1", "status": "pending", "activeForm": "sessionTrackerTasks"}]}}
 </TOOL_CALL>"""
 
     return f"""# TOOL USE INSTRUCTIONS - READ CAREFULLY

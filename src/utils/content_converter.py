@@ -99,6 +99,13 @@ def convert_content_to_oci(content: Union[str, List[dict]]) -> Union[str, List]:
             else:
                 result_text = str(result)
             
+            # Handle empty results - provide clear success message
+            if not result_text or result_text.strip() == "":
+                if is_error:
+                    result_text = "Tool execution failed with no error details"
+                else:
+                    result_text = "Command executed successfully (no output)"
+            
             # Format as a clear result block that models can understand
             if is_error:
                 formatted_result = f"\n<TOOL_RESULT id='{tool_use_id}' status='error'>\n{result_text}\n</TOOL_RESULT>\n"

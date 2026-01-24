@@ -451,28 +451,68 @@ Map Anthropic model names to your OCI models:
 
 ## Logging and Debugging
 
-The gateway provides detailed logging:
+The gateway provides flexible logging with multiple levels to control verbosity.
+
+### Log Levels
+
+Control log output using the `LOG_LEVEL` environment variable:
 
 ```bash
-# Set log level
-export LOG_LEVEL=DEBUG
-python main.py
+# Minimal logging (recommended for production)
+LOG_LEVEL=WARNING python main.py
+
+# Balanced logging (default, recommended for development)
+LOG_LEVEL=INFO python main.py
+
+# Verbose logging (for debugging issues)
+LOG_LEVEL=DEBUG python main.py
 ```
 
-**Log information includes:**
+### What Gets Logged
+
+**WARNING (Minimal):**
+- Configuration loaded
+- Server status
+- Critical errors only
+
+**INFO (Default - Recommended):**
+- Request summaries (stream, tool count)
 - Tool call detection results
-- JSON parsing and fixes
-- Cache control information
-- Token usage estimates
-- Model responses
+- Key operational events
+- Empty tool result handling
 
-**Example logs:**
+**DEBUG (Verbose):**
+- Detailed parameter settings
+- Content conversion details
+- JSON parsing attempts
+- OCI SDK internal requests
+
+### Example Logs
+
+**INFO level (clean output):**
 ```
-INFO:oci-gateway:REQ stream=True tools=5 tool_choice=auto
-INFO:oci-gateway:Detected tool call: get_weather with 1 parameters
-INFO:oci-gateway:Converted tool_result for toolu_abc: 159 chars, is_error=False
+INFO:oci-gateway:Config loaded. Default model: xai.grok-code-fast-1
+INFO:oci-gateway:OCI SDK initialized successfully
+INFO:oci-gateway:Detected tool call: Bash with 1 parameters
 INFO:oci-gateway:Tool detection result: found 1 tool calls
 ```
+
+**DEBUG level (verbose output):**
+```
+INFO:oci-gateway:Config loaded. Default model: xai.grok-code-fast-1
+DEBUG:oci-gateway:Added system prompt (150 chars)
+DEBUG:oci-gateway:Set top_p: 0.9
+INFO:oci-gateway:Detected tool call: Bash with 1 parameters
+DEBUG:oci-gateway:Raw JSON string: {"name": "Bash",...
+```
+
+### Key Features
+
+- **Auto-suppression of OCI SDK logs**: At INFO and WARNING levels, verbose OCI SDK internal logs are hidden
+- **Environment variable control**: No code changes needed, just set `LOG_LEVEL`
+- **Clean format**: `LEVEL:logger_name:message`
+
+For complete logging documentation, see [LOGGING.md](LOGGING.md).
 
 ## Troubleshooting
 

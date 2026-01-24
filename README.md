@@ -1,356 +1,406 @@
-# README.md
+# OCI-Anthropic Gateway
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+A production-ready translation layer that enables OCI GenAI models to work seamlessly with Anthropic's API format, including comprehensive tool calling support.
 
 ## Overview
 
-This is an OCI (Oracle Cloud Infrastructure) GenAI to Anthropic API Gateway. It acts as a translation layer that:
-1. Accepts Anthropic-compatible API requests (Messages API format)
-2. Translates them to OCI GenAI format
-3. Streams responses back in Anthropic's SSE format
+This gateway acts as a bridge between Oracle Cloud Infrastructure (OCI) GenAI services and Anthropic's API format, allowing you to:
 
-This allows using OCI-hosted models (like Grok, GPT variants) with Anthropic's API clients and tools (e.g., Claude Code).
+1. **Use OCI-hosted models** (Grok, GPT variants, Cohere Command-R, etc.) with Anthropic API clients
+2. **Enable tool calling** for models that don't natively support it through advanced prompt engineering
+3. **Stream responses** in Anthropic's Server-Sent Events (SSE) format
+4. **Access advanced features** like prompt caching, vision, extended thinking, and more
 
-## Running the Gateway
+**Key Features:**
+- ✅ Full Anthropic Messages API compatibility
+- ✅ Enhanced tool calling support (native + simulated)
+- ✅ Streaming and non-streaming responses
+- ✅ Prompt caching support
+- ✅ Vision/image analysis
+- ✅ Modular, maintainable codebase
+- ✅ Production-ready with comprehensive error handling
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.12+
+- OCI account with GenAI service access
+- OCI CLI configured (`~/.oci/config`)
+
+### Installation
 
 ```bash
-# Setup virtual environment (first time)
+# Clone the repository
+git clone <repository-url>
+cd oci-anthropic-gateway
+
+# Create virtual environment
 python3.12 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
-
-# Configure OCI credentials in ~/.oci/config (standard OCI SDK location)
-
-# Edit config.json with your OCI compartment_id and model OCIDs
-# Then run:
-python oci-anthropic-gateway.py
 ```
 
-The gateway runs on `0.0.0.0:8000` by default.
+### Configuration
 
-## Configuration
-
-The gateway loads configuration from `config.json`:
-
-### Setup (First Time)
-
-1. **Copy the template**:
+1. **Copy the configuration template:**
    ```bash
    cp config.json.template config.json
    ```
 
-2. **Edit `config.json` with your OCI credentials**:
-   - `compartment_id`: Your OCI compartment OCID
-   - `endpoint`: OCI GenAI service endpoint (region-specific)
-   - `model_definitions`: Replace `your-model-ocid` with actual OCI model OCIDs
+2. **Edit `config.json`:**
+   ```json
+   {
+     "compartment_id": "ocid1.compartment.oc1...",
+     "endpoint": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+     "model_aliases": {
+       "claude-3-5-sonnet-20241022": "gpt5",
+       "claude-3-opus-20240229": "cohere.command-r-plus"
+     },
+     "model_definitions": {
+       "gpt5": {
+         "ocid": "ocid1.generativeaimodel.oc1...",
+         "api_format": "generic",
+         "max_tokens_key": "max_completion_tokens",
+         "temperature": 1.0
+       },
+       "cohere.command-r-plus": {
+         "ocid": "ocid1.generativeaimodel.oc1...",
+         "api_format": "cohere",
+         "max_tokens_key": "max_tokens",
+         "temperature": 0.7
+       }
+     },
+     "default_model": "gpt5"
+   }
+   ```
 
-3. **Configure OCI SDK** in `~/.oci/config`:
+3. **Configure OCI SDK** (`~/.oci/config`):
    ```ini
    [DEFAULT]
    user=ocid1.user.oc1...
-   fingerprint=...
+   fingerprint=aa:bb:cc:dd...
    tenancy=ocid1.tenancy.oc1...
    region=us-chicago-1
    key_file=~/.oci/oci_api_key.pem
    ```
 
-### Configuration Options
+### Running the Gateway
 
-- `compartment_id`: OCI compartment OCID
-- `endpoint`: OCI GenAI service endpoint (region-specific)
-- `model_aliases`: Maps Anthropic model names to OCI model keys
-- `model_definitions`: OCI model configurations with:
-  - `ocid`: The OCI model OCID to use
-  - `max_tokens_key`: Parameter name for token limit (`max_tokens` or `max_completion_tokens`)
-  - `temperature`: Fixed temperature (overrides request)
-- `default_model`: Fallback model when requested model not found
+```bash
+# Using the modular entry point (recommended)
+python main.py
 
-> **⚠️ SECURITY**: `config.json` is in `.gitignore` and will not be committed. Never commit files containing real OCIDs or API keys.
-
-## Supported Features
-
-### Core Messages API
-
-The gateway supports the full Anthropic Messages API with the following features:
-
-#### 1. System Prompts
-
-Define system-level instructions for the model:
-
-```json
-{
-    "model": "claude-3-5-sonnet-20241022",
-    "system": "You are a helpful assistant specialized in Python programming.",
-    "messages": [
-        {"role": "user", "content": "How do I read a file in Python?"}
-    ]
-}
+# Or using the legacy single-file version
+python oci-anthropic-gateway.py
 ```
 
-**Array format** (supports cache_control):
-```json
-{
-    "system": [
-        {"type": "text", "text": "You are a helpful assistant."},
-        {"type": "text", "text": "Be concise and accurate."}
-    ]
-}
+The gateway runs on `0.0.0.0:8001` by default.
+
+## Architecture
+
+The codebase has been refactored from a single 2000+ line file into a modular structure for better maintainability:
+
+```
+oci-anthropic-gateway/
+├── main.py                      # Modern entry point
+├── oci-anthropic-gateway.py     # Legacy single-file (backward compatible)
+├── config.json                  # Configuration
+├── src/
+│   ├── config/                  # Configuration management
+│   │   └── __init__.py         # Config class, OCI client initialization
+│   ├── utils/                   # Utility modules
+│   │   ├── constants.py        # Constants and stop reasons
+│   │   ├── token.py            # Token counting utilities
+│   │   ├── tools.py            # Tool calling conversion
+│   │   ├── cache.py            # Cache control utilities
+│   │   ├── json_helper.py      # JSON parsing and fixing
+│   │   └── content_converter.py # Content format conversion
+│   ├── services/                # Business logic
+│   │   └── generation.py       # OCI generation service
+│   └── routes/                  # API routes
+│       └── handlers.py         # Request handlers
+└── requirements.txt
 ```
 
-#### 2. Tool Calling (Function Calling)
+### Key Components
 
-Enable the model to call external functions. The gateway supports tool calling through two mechanisms:
+| Module | Purpose |
+|--------|---------|
+| **config/** | Load configuration, initialize OCI clients |
+| **utils/constants.py** | Define constants, stop reasons, pre-compiled regex patterns |
+| **utils/token.py** | Token counting and estimation |
+| **utils/tools.py** | Convert Anthropic tools to OCI/Cohere format, build tool instructions |
+| **utils/json_helper.py** | Parse and fix malformed JSON from models |
+| **utils/content_converter.py** | Convert between Anthropic, OCI, and Cohere formats |
+| **services/generation.py** | Core generation logic (streaming & non-streaming) |
+| **routes/handlers.py** | FastAPI route handlers |
 
-**1. Native Function Calling (Cohere Models)**
+## Tool Calling Support
 
-Models configured with `api_format: "cohere"` use OCI's native Function Calling support:
+A major focus of this gateway is providing robust tool calling support for OCI GenAI models that lack native function calling capabilities.
 
-```json
-{
-    "model": "cohere.command-r-plus",
-    "tools": [
-        {
-            "name": "get_weather",
-            "description": "Get current weather for a location",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string"}
-                },
-                "required": ["location"]
-            }
-        }
-    ],
-    "messages": [
-        {"role": "user", "content": "What's the weather in Tokyo?"}
-    ]
-}
-```
+### Two Approaches
 
-**2. Simulated Tool Calling (Generic Models)**
+#### 1. Native Function Calling (Cohere Models)
 
-For models configured with `api_format: "generic"` (xAI Grok, OpenAI GPT, etc.), the gateway uses prompt engineering to simulate tool calling:
-
-- The gateway injects a system prompt with tool definitions and usage instructions
-- Models are instructed to output tool calls in `<TOOL_CALL>JSON</TOOL_CALL>` format
-- The gateway detects and parses these tool call blocks
-- Supports multiple tool calls in a single response
-
-**Configuration Example**:
+Models configured with `api_format: "cohere"` use OCI's native function calling:
 
 ```json
 {
-    "model_definitions": {
-        "cohere.command-r-plus": {
-            "ocid": "ocid1.generativeaimodel.oc1...",
-            "api_format": "cohere",
-            "max_tokens_key": "max_tokens",
-            "temperature": 0.7
-        },
-        "openai.gpt-5.2-2025-12-11": {
-            "ocid": "ocid1.generativeaimodel.oc1...",
-            "api_format": "generic",
-            "max_tokens_key": "max_completion_tokens",
-            "temperature": 1.0
-        }
+  "model": "cohere.command-r-plus",
+  "tools": [{
+    "name": "get_weather",
+    "description": "Get current weather",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "location": {"type": "string"}
+      },
+      "required": ["location"]
     }
+  }],
+  "messages": [
+    {"role": "user", "content": "What's the weather in Tokyo?"}
+  ]
 }
 ```
 
-**Tool Choice Options**:
-- `"auto"` (default): Model decides when to use tools
-- `"any"` or `"required"`: Must use at least one tool
-- `"none"`: Don't use tools
-- `{"type": "tool", "name": "tool_name"}`: Force specific tool
+#### 2. Simulated Tool Calling (Generic Models)
 
-**Tool Response Format**:
+For models with `api_format: "generic"` (xAI Grok, OpenAI GPT, etc.), the gateway uses advanced prompt engineering:
 
-The gateway converts tool results back to Anthropic format:
+**How it works:**
+1. Injects detailed system prompt with tool definitions and usage instructions
+2. Models output tool calls in `<TOOL_CALL>JSON</TOOL_CALL>` format
+3. Gateway detects, parses, and converts to Anthropic format
+4. Supports multiple tool calls in one response
+
+**Example model output:**
+```
+<TOOL_CALL>
+{"name": "get_weather", "input": {"location": "Tokyo"}}
+</TOOL_CALL>
+```
+
+**Gateway converts to:**
+```json
+{
+  "content": [{
+    "type": "tool_use",
+    "id": "toolu_abc123",
+    "name": "get_weather",
+    "input": {"location": "Tokyo"}
+  }],
+  "stop_reason": "tool_use"
+}
+```
+
+### Enhanced JSON Parsing
+
+The gateway includes sophisticated JSON parsing to handle malformed model outputs:
+
+**Fixes applied:**
+- Missing quotes around keys/values
+- Single quotes → double quotes
+- Trailing commas
+- Unquoted property names
+- Incomplete JSON objects
+- Embedded JSON in text
+
+**Example:**
+```javascript
+// Model outputs (malformed):
+{name: "search", input: {query: 'test',}}
+
+// Gateway fixes to:
+{"name": "search", "input": {"query": "test"}}
+```
+
+### Natural Language Fallback
+
+When models don't follow the exact `<TOOL_CALL>` format, the gateway has fallback detection:
+
+**Patterns detected:**
+- "I'll use the [tool_name] tool..."
+- "Calling [tool_name] with..."
+- "Let me [tool_name]..."
+- Standalone JSON objects with "name" and "input" fields
+
+### Tool Choice Strategies
 
 ```json
 {
-    "role": "user",
-    "content": [
-        {
-            "type": "tool_result",
-            "tool_use_id": "toolu_abc123",
-            "content": "The weather in Tokyo is 22°C and sunny."
-        }
-    ]
+  "tool_choice": "auto"  // Options: auto, required, any, none, {"type": "tool", "name": "..."}
 }
 ```
 
-**Implementation Details**:
+| Strategy | Behavior |
+|----------|----------|
+| `auto` (default) | Model decides when to use tools |
+| `required`/`any` | Must use at least one tool |
+| `none` | Don't use tools |
+| `{"type": "tool", "name": "..."}` | Force specific tool |
 
-- **Native (Cohere)**: Uses `CohereChatRequest` with `tools` and `tool_results` parameters
-- **Simulated (Generic)**: Injects system prompt with tool definitions, detects `<TOOL_CALL>` blocks in model output
-- **Streaming**: Buffers text during streaming to detect tool calls, sends clean text + tool call events
-- **Multi-tool**: Supports detecting and parsing multiple `<TOOL_CALL>` blocks in one response
+### Tool Result Format
 
-#### 3. Thinking Mode (Extended Thinking)
+The gateway converts tool results to the Anthropic format with clear XML-like markers:
 
-Enable the model to show its reasoning process:
-
-```json
-{
-    "model": "claude-3-5-sonnet-20241022",
-    "thinking": {
-        "type": "enabled",
-        "budget_tokens": 16000
-    },
-    "messages": [
-        {"role": "user", "content": "Solve this complex problem step by step."}
-    ]
-}
+```xml
+<TOOL_RESULT id='toolu_xxx' status='success'>
+{"temperature": "22°C", "condition": "sunny"}
+</TOOL_RESULT>
 ```
 
-#### 4. Sampling Parameters
-
-Control the model's output generation:
-
-```json
-{
-    "model": "claude-3-5-sonnet-20241022",
-    "temperature": 0.7,
-    "top_k": 50,
-    "top_p": 0.9,
-    "max_tokens": 4096,
-    "messages": [...]
-}
+Or for errors:
+```xml
+<TOOL_RESULT id='toolu_xxx' status='error'>
+Error message here
+</TOOL_RESULT>
 ```
 
-| Parameter | Range | Description |
-|-----------|-------|-------------|
-| `temperature` | 0.0 - 1.0 | Controls randomness (lower = more focused) |
-| `top_k` | > 0 | Limit to top K most probable tokens |
-| `top_p` | 0.0 - 1.0 | Nucleus sampling threshold |
-| `max_tokens` | > 0 | Maximum tokens to generate |
+## API Features
 
-#### 5. Stop Sequences
-
-Define custom stop strings to end generation:
-
-```json
-{
-    "model": "claude-3-5-sonnet-20241022",
-    "stop_sequences": ["\n\n", "END", "###"],
-    "messages": [...]
-}
-```
-
-#### 6. Images / Vision
-
-Send images for analysis (base64 encoded):
-
-```json
-{
-    "model": "claude-3-5-sonnet-20241022",
-    "messages": [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "What's in this image?"},
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA..."
-                    }
-                }
-            ]
-        }
-    ]
-}
-```
-
-#### 7. Prompt Caching
-
-Cache frequently used prompts to reduce costs:
-
-```json
-{
-    "system": [
-        {
-            "type": "text",
-            "text": "You are a helpful assistant with extensive knowledge...",
-            "cache_control": {"type": "ephemeral"}
-        }
-    ],
-    "messages": [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Here is a large document to analyze...",
-                    "cache_control": {"type": "ephemeral"}
-                }
-            ]
-        }
-    ]
-}
-```
-
-**Response includes cache metrics**:
-```json
-{
-    "usage": {
-        "input_tokens": 1500,
-        "output_tokens": 200,
-        "cache_creation_input_tokens": 1200,
-        "cache_read_input_tokens": 300
-    }
-}
-```
-
-#### 8. Metadata
-
-Attach custom metadata to requests for tracking:
-
-```json
-{
-    "model": "claude-3-5-sonnet-20241022",
-    "metadata": {
-        "user_id": "usr_12345",
-        "conversation_id": "conv_abc789",
-        "request_id": "req_xyz456"
-    },
-    "messages": [...]
-}
-```
-
-**Response echoes metadata**:
-```json
-{
-    "type": "message",
-    "content": [...],
-    "metadata": {
-        "user_id": "usr_12345",
-        "conversation_id": "conv_abc789"
-    }
-}
-```
-
-### Endpoints
+### Supported Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/messages` | POST | Create a message (streaming & non-streaming) |
+| `/v1/messages` | POST | Create messages (streaming & non-streaming) |
 | `/v1/messages/count_tokens` | POST | Count tokens in request |
 
-### Token Counting
+### Messages API Features
 
-Estimate tokens before making a request:
+#### 1. System Prompts
+
+```json
+{
+  "system": "You are a helpful programming assistant.",
+  "messages": [...]
+}
+```
+
+Array format with cache control:
+```json
+{
+  "system": [
+    {"type": "text", "text": "You are a helpful assistant."},
+    {"type": "text", "text": "Be concise.", "cache_control": {"type": "ephemeral"}}
+  ]
+}
+```
+
+#### 2. Streaming
+
+```bash
+curl -X POST http://localhost:8001/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "stream": true,
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+Emits Anthropic-compatible SSE events:
+- `message_start`
+- `content_block_start`
+- `content_block_delta`
+- `content_block_stop`
+- `message_delta`
+- `message_stop`
+
+#### 3. Vision / Images
+
+```json
+{
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "What's in this image?"},
+      {
+        "type": "image",
+        "source": {
+          "type": "base64",
+          "media_type": "image/png",
+          "data": "iVBORw0KGgo..."
+        }
+      }
+    ]
+  }]
+}
+```
+
+#### 4. Extended Thinking
+
+```json
+{
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 16000
+  },
+  "messages": [...]
+}
+```
+
+#### 5. Prompt Caching
+
+```json
+{
+  "system": [{
+    "type": "text",
+    "text": "Long system prompt...",
+    "cache_control": {"type": "ephemeral"}
+  }]
+}
+```
+
+Response includes cache metrics:
+```json
+{
+  "usage": {
+    "input_tokens": 1500,
+    "cache_creation_input_tokens": 1200,
+    "cache_read_input_tokens": 300,
+    "output_tokens": 200
+  }
+}
+```
+
+#### 6. Sampling Parameters
+
+```json
+{
+  "temperature": 0.7,
+  "top_k": 50,
+  "top_p": 0.9,
+  "max_tokens": 4096,
+  "stop_sequences": ["\n\n", "END"]
+}
+```
+
+#### 7. Metadata
+
+```json
+{
+  "metadata": {
+    "user_id": "usr_12345",
+    "conversation_id": "conv_abc789"
+  }
+}
+```
+
+Echoed in response.
+
+#### 8. Token Counting
 
 ```bash
 curl -X POST http://localhost:8001/v1/messages/count_tokens \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-3-5-sonnet-20241022",
-    "messages": [
-      {"role": "user", "content": "Hello, how are you?"}
-    ]
+    "messages": [{"role": "user", "content": "Hello"}]
   }'
 ```
 
@@ -362,45 +412,193 @@ Response:
 }
 ```
 
-## Architecture
+## Configuration Options
 
-**Single-file design**: All logic is in `oci-anthropic-gateway.py`
+### Model Configuration
 
-**Main components**:
+```json
+{
+  "model_definitions": {
+    "model-key": {
+      "ocid": "ocid1.generativeaimodel.oc1...",
+      "api_format": "generic",  // or "cohere"
+      "max_tokens_key": "max_completion_tokens",  // or "max_tokens"
+      "temperature": 1.0
+    }
+  }
+}
+```
 
-1. **Configuration loading** (lines 16-39): Loads `config.json` and OCI SDK config
+| Field | Description |
+|-------|-------------|
+| `ocid` | OCI model OCID |
+| `api_format` | `"generic"` (simulated tools) or `"cohere"` (native tools) |
+| `max_tokens_key` | Parameter name: `"max_tokens"` or `"max_completion_tokens"` |
+| `temperature` | Fixed temperature (overrides request) |
 
-2. **`generate_oci_stream()` function** (lines 58-167): Core streaming logic
-   - Builds OCI ChatDetails request
-   - Handles dynamic parameter adaptation (max_tokens key, temperature)
-   - Calls OCI GenAI API
-   - Converts OCI streaming events to Anthropic SSE format
-   - Emits proper Anthropic event sequence: `message_start` -> `content_block_start` -> `content_block_delta` (text chunks) -> `content_block_stop` -> `message_delta` -> `message_stop` -> `[DONE]`
+### Model Aliases
 
-3. **`@app.post("/{path:path}")` catch-all route** (lines 172-230):
-   - Handles telemetry/token-count stubs
-   - Processes `/v1/messages` requests
-   - Model alias resolution (maps requested model to OCI config)
-   - Message format conversion (Anthropic -> OCI)
-   - Returns streaming response with proper SSE headers
+Map Anthropic model names to your OCI models:
 
-**Key design patterns**:
-- Model lookup tries aliases first, then direct match in definitions, falls back to default
-- Content handling supports both string and structured content formats
-- Error handling yields SSE error events for client compatibility
+```json
+{
+  "model_aliases": {
+    "claude-3-5-sonnet-20241022": "gpt5",
+    "claude-3-opus-20240229": "cohere.command-r-plus"
+  }
+}
+```
+
+## Logging and Debugging
+
+The gateway provides detailed logging:
+
+```bash
+# Set log level
+export LOG_LEVEL=DEBUG
+python main.py
+```
+
+**Log information includes:**
+- Tool call detection results
+- JSON parsing and fixes
+- Cache control information
+- Token usage estimates
+- Model responses
+
+**Example logs:**
+```
+INFO:oci-gateway:REQ stream=True tools=5 tool_choice=auto
+INFO:oci-gateway:Detected tool call: get_weather with 1 parameters
+INFO:oci-gateway:Converted tool_result for toolu_abc: 159 chars, is_error=False
+INFO:oci-gateway:Tool detection result: found 1 tool calls
+```
+
+## Troubleshooting
+
+### Tool Calls Not Detected
+
+**Check:**
+1. Review logs for tool detection messages
+2. Verify tool definition format
+3. Try explicit tool names in user message
+4. Simplify tool descriptions
+5. Test with `tool_choice: "required"`
+
+### JSON Parsing Errors
+
+**Check:**
+1. Review raw model output in logs
+2. Check for special characters
+3. Verify JSON structure
+4. Review `fix_json_issues` logs
+
+### WebSearch Returns Empty
+
+This is an issue with the Anthropic client environment, not the gateway:
+- Check API keys/credentials
+- Verify network access
+- Try different search queries
+- Test with other tools (Glob, Bash, etc.)
+
+### Model Not Following Tool Format
+
+**Solutions:**
+1. Switch to a Cohere model for native support
+2. Use more explicit prompts: "Use the ListFiles tool to..."
+3. Set `tool_choice: "required"`
+4. Check model compatibility
+
+## Performance Considerations
+
+- **Pre-compiled regex**: Patterns compiled at module level
+- **Streaming efficiency**: Tool detection after complete text received
+- **Token optimization**: Simplified instructions for 10+ tools
+- **Caching**: Consider caching tool definition conversions
 
 ## Adding New Models
 
-Edit `config.json`:
-1. Add entry to `model_definitions` with the OCI model OCID
-2. Optionally add alias in `model_aliases` to map Anthropic names
-3. Set `max_tokens_key` based on model (check OCI docs)
-4. Set `temperature` if model requires specific value
+1. Get the OCI model OCID from OCI Console
+2. Add to `model_definitions` in `config.json`:
+   ```json
+   {
+     "my-model": {
+       "ocid": "ocid1.generativeaimodel.oc1...",
+       "api_format": "generic",  // or "cohere"
+       "max_tokens_key": "max_tokens",
+       "temperature": 0.7
+     }
+   }
+   ```
+3. Optionally add alias:
+   ```json
+   {
+     "model_aliases": {
+       "claude-3-5-sonnet-20241022": "my-model"
+     }
+   }
+   ```
 
 ## Dependencies
 
-- `fastapi`: Web framework
-- `uvicorn`: ASGI server
-- `oci`: Oracle Cloud Infrastructure SDK (GenAI inference client)
-- `httpx`: HTTP client (not currently used but listed)
-- `python-dotenv`: Environment variable loading (not currently used)
+```
+fastapi>=0.104.0
+uvicorn>=0.24.0
+oci>=2.119.0
+httpx>=0.25.0
+python-dotenv>=1.0.0
+```
+
+## Security Notes
+
+- `config.json` is in `.gitignore` - never commit it
+- Use OCI IAM policies to restrict model access
+- Consider implementing authentication for production
+- Monitor token usage and costs
+
+## Migration from Single-File Version
+
+The original `oci-anthropic-gateway.py` remains functional for backward compatibility. To migrate:
+
+1. **Test the new version:**
+   ```bash
+   python main.py
+   ```
+
+2. **Update any scripts** that reference the old file
+
+3. **Keep using old version** if needed - both work identically
+
+## Future Enhancements
+
+Planned improvements:
+- [ ] ML-driven tool call detection
+- [ ] Adaptive prompt optimization
+- [ ] Tool usage statistics and analytics
+- [ ] Enhanced error recovery
+- [ ] Performance monitoring and tracing
+
+## Contributing
+
+Contributions welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Submit a pull request
+
+## License
+
+[Add your license information here]
+
+## Support
+
+For issues, questions, or contributions:
+- Open an issue on GitHub
+- Check logs for detailed error information
+- Review TOOLS_SUPPORT.md for tool calling details
+- Review REFACTORING.md for architecture details
+
+---
+
+**Last Updated**: 2026-01-24  
+**Version**: 2.0 (Modular Architecture with Enhanced Tool Support)

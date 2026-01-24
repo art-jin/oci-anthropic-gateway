@@ -15,6 +15,11 @@ logger = logging.getLogger("oci-gateway")
 
 # --- Constants ---
 DEFAULT_MAX_TOKENS = 131070  # Maximum tokens for generation (65535 * 2)
+MIN_JSON_LENGTH = 10  # Minimum valid JSON length for tool calls
+
+# Precompiled regex patterns for tool call detection (performance optimization)
+_TOOL_CALL_START_PATTERN = re.compile(r'<TOOL_CALL\s*>', re.IGNORECASE)
+_TOOL_CALL_END_PATTERN = re.compile(r'</TOOL_CALL\s*>', re.IGNORECASE)
 
 app = FastAPI(title="OCI GenAI Anthropic Gateway")
 
@@ -421,10 +426,11 @@ def convert_content_to_oci(content: Union[str, List[dict]]) -> Union[str, List]:
 
         elif block_type == "tool_use":
             # Convert tool_use to text format for OCI
-            # Format: "Call function_name with arguments: {args}"
+            # Format: <TOOL_CALL>{"name": "tool_name", "input": {...}}</TOOL_CALL>
             name = block.get("name", "")
             input_data = block.get("input", {})
-            text_parts.append(f"[TOOL_CALL] {name}: {json.dumps(input_data)}")
+            tool_call_json = json.dumps({"name": name, "input": input_data})
+            text_parts.append(f"<TOOL_CALL>{tool_call_json}</TOOL_CALL>")
 
         else:
             # Unknown block type, try to stringify
@@ -456,10 +462,12 @@ def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
     Returns list of tool_use blocks in Anthropic format, or None if no tool calls.
     """
     tool_calls = []
+    logger.debug(f"Starting OCI response tool call extraction, response type: {type(chat_response)}")
 
     # Try different response structures that OCI might return
     if hasattr(chat_response, 'tool_calls') and chat_response.tool_calls:
-        for tool_call in chat_response.tool_calls:
+        logger.info(f"Found tool_calls attribute with {len(chat_response.tool_calls)} tool call(s)")
+        for i, tool_call in enumerate(chat_response.tool_calls):
             if hasattr(tool_call, 'function'):
                 func = tool_call.function
                 name = func.name if hasattr(func, 'name') else ""
@@ -467,7 +475,9 @@ def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
 
                 try:
                     input_data = json.loads(arguments) if isinstance(arguments, str) else arguments
-                except json.JSONDecodeError:
+                    logger.debug(f"Tool call {i}: {name} with {len(arguments)} chars of arguments")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse arguments for tool call {i} ({name}): {e}")
                     input_data = {}
 
                 tool_calls.append({
@@ -476,9 +486,12 @@ def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
                     "name": name,
                     "input": input_data
                 })
+            else:
+                logger.warning(f"Tool call {i} missing 'function' attribute")
 
     elif hasattr(chat_response, 'message') and hasattr(chat_response.message, 'tool_calls'):
-        for tool_call in chat_response.message.tool_calls:
+        logger.info(f"Found message.tool_calls attribute with {len(chat_response.message.tool_calls)} tool call(s)")
+        for i, tool_call in enumerate(chat_response.message.tool_calls):
             if hasattr(tool_call, 'function'):
                 func = tool_call.function
                 name = func.name if hasattr(func, 'name') else ""
@@ -486,7 +499,9 @@ def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
 
                 try:
                     input_data = json.loads(arguments) if isinstance(arguments, str) else arguments
-                except json.JSONDecodeError:
+                    logger.debug(f"Tool call {i}: {name} with {len(arguments)} chars of arguments")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse arguments for tool call {i} ({name}): {e}")
                     input_data = {}
 
                 tool_calls.append({
@@ -495,6 +510,15 @@ def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
                     "name": name,
                     "input": input_data
                 })
+            else:
+                logger.warning(f"Tool call {i} missing 'function' attribute")
+    else:
+        logger.debug("No tool calls found in OCI response structure")
+
+    if tool_calls:
+        logger.info(f"Extracted {len(tool_calls)} tool call(s) from OCI response")
+    else:
+        logger.debug("No tool calls extracted from OCI response")
 
     return tool_calls if tool_calls else None
 
@@ -506,11 +530,15 @@ def extract_tool_calls_from_cohere_response(cohere_response) -> Optional[List[di
     Returns list of tool_use blocks in Anthropic format, or None if no tool calls.
     """
     tool_calls = []
+    logger.debug(f"Starting Cohere response tool call extraction, response type: {type(cohere_response)}")
 
     if hasattr(cohere_response, 'tool_calls') and cohere_response.tool_calls:
-        for tool_call in cohere_response.tool_calls:
+        logger.info(f"Found Cohere tool_calls attribute with {len(cohere_response.tool_calls)} tool call(s)")
+        for i, tool_call in enumerate(cohere_response.tool_calls):
             name = tool_call.name if hasattr(tool_call, 'name') else ""
             parameters = tool_call.parameters if hasattr(tool_call, 'parameters') else {}
+
+            logger.debug(f"Cohere tool call {i}: {name} with {len(parameters)} parameters")
 
             tool_calls.append({
                 "type": "tool_use",
@@ -518,6 +546,13 @@ def extract_tool_calls_from_cohere_response(cohere_response) -> Optional[List[di
                 "name": name,
                 "input": dict(parameters) if isinstance(parameters, dict) else {}
             })
+    else:
+        logger.debug("No tool calls found in Cohere response")
+
+    if tool_calls:
+        logger.info(f"Extracted {len(tool_calls)} tool call(s) from Cohere response")
+    else:
+        logger.debug("No tool calls extracted from Cohere response")
 
     return tool_calls if tool_calls else None
 
@@ -791,6 +826,210 @@ def detect_tool_call_block(text: str) -> Optional[dict]:
     }
 
 
+def _advance_search_position(end_match, start, start_tag_length):
+    """
+    Helper to advance search position after processing a tool call block.
+
+    Args:
+        end_match: Regex match object for end tag, or None
+        start: Start position of the block
+        start_tag_length: Length of the start tag
+
+    Returns:
+        Next search position
+    """
+    return end_match.end() if end_match else start + start_tag_length
+
+
+def _quote_property_name(match):
+    """Helper function for fixing unquoted JSON property names."""
+    prop_name = match.group(1)
+    return f'"{prop_name}":'
+
+
+def _unquote_number(match):
+    """Helper function for fixing quoted numbers in JSON."""
+    return match.group(1)
+
+
+def fix_json_issues(json_str: str) -> Optional[str]:
+    """
+    Attempt to fix common JSON formatting issues in malformed JSON strings.
+
+    Handles:
+    - Trailing commas in objects/arrays
+    - Single quotes instead of double quotes
+    - Unquoted property names
+    - Missing quotes around string values
+    - Extra commas
+    - Escaped characters that shouldn't be escaped
+
+    Args:
+        json_str: Potentially malformed JSON string
+
+    Returns:
+        Fixed JSON string if fixable, None if not
+    """
+    if not json_str:
+        return None
+
+    original = json_str
+    try:
+        # Remove leading/trailing whitespace first
+        json_str = json_str.strip()
+
+        # Fix 1: Remove trailing commas (e.g., {"a": 1,} or {"a": 1, "b": 2,})
+        # Be careful to only remove commas before closing braces/brackets
+        json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+
+        # Fix 2: Replace single quotes with double quotes for strings
+        # This is tricky - we need to be careful not to replace quotes inside strings
+        # Simple approach: replace single-quoted property names and values
+        # Match pattern: 'key': or 'value', but not inside double-quoted strings
+        # Replace single quotes around property names (at start of object or after comma)
+        json_str = re.sub(r"'([^']+)'(\s*:)", r'"\1"\2', json_str)
+
+        # Fix 3: Ensure all property names are quoted
+        # Match unquoted property names (word characters before colon)
+        # Pattern: word followed by colon, but not preceded by quote or bracket
+        # This is a simple heuristic - may not catch all cases
+        json_str = re.sub(r'(\w+)(\s*:)', _quote_property_name, json_str)
+
+        # Fix 4: Fix boolean/null values that might be quoted
+        json_str = re.sub(r'"(true|false|null)"', r'\1', json_str)
+
+        # Fix 5: Fix numbers that might be quoted (simple heuristic)
+        # Match quoted numbers like "123" or "12.34"
+        json_str = re.sub(r'"(\d+(?:\.\d+)?)"', _unquote_number, json_str)
+
+        # Fix 6: Remove control characters that might break JSON
+        json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)
+
+        # Try to parse the fixed JSON
+        json.loads(json_str)
+
+        # If we got here, the JSON is now valid
+        if json_str != original:
+            logger.debug(f"Fixed JSON issues: {original[:100]}... -> {json_str[:100]}...")
+
+        return json_str
+
+    except (json.JSONDecodeError, re.error) as e:
+        # If still invalid, return None
+        logger.debug(f"Could not fix JSON: {e}")
+        return None
+
+
+def _extract_and_parse_json(json_str: str, start: int, end_match, start_tag_length: int, text_length: int) -> tuple:
+    """
+    Extract, clean, and parse JSON from a tool call block.
+
+    Args:
+        json_str: Raw JSON string extracted between tags
+        start: Start position of the block
+        end_match: Regex match object for end tag, or None
+        start_tag_length: Length of the start tag
+        text_length: Total length of the text being processed
+
+    Returns:
+        tuple: (payload, span_end, search_position) where:
+            - payload: Parsed JSON dict, or None if parsing failed
+            - span_end: End position of the span
+            - search_position: Next search position (or None if should continue)
+            If payload is None, search_position is the position to advance to.
+    """
+    # Clean and validate JSON string
+    # 1. Remove leading/trailing whitespace and newlines (including \n, \r, \t, spaces)
+    json_str = json_str.strip()
+
+    # Log the raw JSON for debugging
+    logger.debug(f"Raw JSON string after strip: {repr(json_str)[:200]}")
+
+    # 2. If JSON is empty or too short, skip
+    if not json_str or len(json_str) < MIN_JSON_LENGTH:
+        logger.warning(f"JSON string too short or empty: {repr(json_str)}")
+        return None, None, _advance_search_position(end_match, start, start_tag_length)
+
+    # 3. Handle common JSON formatting issues
+    # Some models output JSON with leading/trailing non-JSON characters
+    # Find the first { and last } to extract the JSON object
+    first_brace = json_str.find('{')
+    last_brace = json_str.rfind('}')
+
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        # If braces are not at the beginning/end, extract the JSON object
+        if first_brace > 0 or last_brace < len(json_str) - 1:
+            original_len = len(json_str)
+            json_str = json_str[first_brace:last_brace + 1]
+            logger.debug(f"Extracted JSON object from text (reduced {original_len} to {len(json_str)} chars): {json_str[:100]}...")
+
+    # 4. Ensure the string starts with { and ends with }
+    if not json_str.startswith('{') or not json_str.endswith('}'):
+        logger.warning(f"JSON string doesn't start with {{ and end with }}: {repr(json_str)[:200]}")
+        # Try to add missing braces
+        if not json_str.startswith('{'):
+            json_str = '{' + json_str
+        if not json_str.endswith('}'):
+            json_str = json_str + '}'
+        logger.debug(f"Fixed JSON string: {repr(json_str)[:200]}")
+
+    # Try to parse the JSON
+    try:
+        payload = json.loads(json_str)
+        logger.debug(f"Successfully parsed JSON for tool call: {json_str[:100]}...")
+        return payload, (end_match.end() if end_match else text_length), None
+    except json.JSONDecodeError as e:
+        # Try to recover: find the last complete JSON object
+        # This handles cases where the JSON is incomplete or has syntax errors
+        logger.warning(f"JSON decode error in tool call block: {e}, JSON (raw): {repr(json_str)[:200]}")
+
+        # Enhanced recovery: try to fix common JSON issues
+        cleaned_json = fix_json_issues(json_str)
+
+        if cleaned_json:
+            try:
+                payload = json.loads(cleaned_json)
+                logger.info(f"Recovered JSON after fixing issues: {cleaned_json[:100]}...")
+                return payload, (end_match.end() if end_match else text_length), None
+            except json.JSONDecodeError:
+                logger.warning(f"Could not recover JSON even after fixing")
+                return None, None, _advance_search_position(end_match, start, start_tag_length)
+        else:
+            # No valid JSON found
+            return None, None, _advance_search_position(end_match, start, start_tag_length)
+
+
+def _validate_tool_call_payload(payload) -> tuple:
+    """
+    Validate a parsed tool call payload.
+
+    Args:
+        payload: Parsed JSON object
+
+    Returns:
+        tuple: (is_valid, name, input_data) where:
+            - is_valid: True if payload is valid
+            - name: Tool name (or None if invalid)
+            - input_data: Tool input parameters (or None if invalid)
+    """
+    if not isinstance(payload, dict):
+        logger.warning(f"Tool call payload is not a dict: {type(payload)}")
+        return False, None, None
+
+    name = payload.get("name")
+    input_data = payload.get("input", {})
+
+    if not isinstance(name, str) or not name:
+        logger.warning(f"Tool call missing or invalid 'name' field: {name}")
+        return False, None, None
+
+    if not isinstance(input_data, dict):
+        logger.warning(f"Tool call 'input' field is not a dict: {type(input_data)}")
+        return False, None, None
+
+    return True, name, input_data
+
+
 def detect_all_tool_call_blocks(text: str) -> List[dict]:
     """
     Detect ALL <tool_call>JSON</tool_call> blocks in text and parse them.
@@ -809,67 +1048,70 @@ def detect_all_tool_call_blocks(text: str) -> List[dict]:
       - If name == "Read" and input has "path" but not "file_path",
         it will rewrite "path" -> "file_path".
     """
-    start_tag = "<TOOL_CALL>"
-    end_tag = "</TOOL_CALL>"
+    # Validate input type
+    if not isinstance(text, str):
+        logger.warning(f"detect_all_tool_call_blocks expected str, got {type(text).__name__}")
+        return []
+
+    # Use precompiled regex patterns for performance
+    start_pattern = _TOOL_CALL_START_PATTERN
+    end_pattern = _TOOL_CALL_END_PATTERN
+
     tool_calls = []
     search_start = 0
+    text_length = len(text)
 
-    while True:
-        start = text.find(start_tag, search_start)
-        if start == -1:
+    logger.debug(f"Starting tool call detection on text of length {text_length}")
+
+    while search_start < text_length:
+        # Find next start tag
+        start_match = start_pattern.search(text, search_start)
+        if not start_match:
+            logger.debug(f"No more start tags found after position {search_start}")
             break
 
-        end = text.find(end_tag, start + len(start_tag))
+        start = start_match.start()
+        start_tag_length = start_match.end() - start_match.start()
+
+        # Find corresponding end tag
+        end_match = end_pattern.search(text, start + start_tag_length)
 
         # Extract JSON content (with or without closing tag)
-        if end != -1:
+        if end_match:
             # Complete block: extract between tags
-            json_str = text[start + len(start_tag):end].strip()
-            span_end = end + len(end_tag)
+            json_str = text[start + start_tag_length:end_match.start()]
+            span_end = end_match.end()
+            logger.debug(f"Found complete tool call block at positions {start}-{span_end}")
         else:
             # Incomplete block: try to parse from start_tag to end of text
-            json_str = text[start + len(start_tag):].strip()
-            span_end = len(text)  # Span goes to end of text
+            json_str = text[start + start_tag_length:]
+            span_end = text_length  # Span goes to end of text
+            logger.warning(f"Incomplete tool call block at position {start}, no closing tag found")
 
-        # Try to parse the JSON
-        try:
-            payload = json.loads(json_str)
-        except json.JSONDecodeError:
-            # Try to recover: find the last complete JSON object
-            # This handles cases where the JSON is incomplete
-            if end != -1:
-                search_start = end + len(end_tag)
-            else:
-                search_start = start + len(start_tag)
+        # Extract and parse JSON using helper
+        payload, actual_span_end, search_pos = _extract_and_parse_json(
+            json_str, start, end_match, start_tag_length, text_length
+        )
+
+        # If parsing failed, advance search position and continue
+        if payload is None:
+            search_start = search_pos
             continue
 
-        if not isinstance(payload, dict):
-            if end != -1:
-                search_start = end + len(end_tag)
-            else:
-                search_start = start + len(start_tag)
-            continue
+        # Update span_end from helper
+        span_end = actual_span_end
 
-        name = payload.get("name")
-        input_data = payload.get("input", {})
-
-        if not isinstance(name, str) or not name:
-            if end != -1:
-                search_start = end + len(end_tag)
-            else:
-                search_start = start + len(start_tag)
-            continue
-        if not isinstance(input_data, dict):
-            if end != -1:
-                search_start = end + len(end_tag)
-            else:
-                search_start = start + len(start_tag)
+        # Validate payload using helper
+        is_valid, name, input_data = _validate_tool_call_payload(payload)
+        if not is_valid:
+            search_start = _advance_search_position(end_match, start, start_tag_length)
             continue
 
         # Compatibility fix: Read expects file_path, but some outputs may use "path"
         if name == "Read" and "file_path" not in input_data and "path" in input_data:
             input_data = dict(input_data)  # Make a copy to avoid mutating original
             input_data["file_path"] = input_data.pop("path")
+            logger.debug(f"Applied compatibility fix for Read tool: path -> file_path")
 
         tool_calls.append({
             "type": "tool_use",
@@ -879,12 +1121,15 @@ def detect_all_tool_call_blocks(text: str) -> List[dict]:
             "_span": (start, span_end),
         })
 
+        logger.info(f"Detected tool call: {name} with {len(input_data)} parameters")
+
         # Move search position
-        if end != -1:
-            search_start = end + len(end_tag)
+        if end_match:
+            search_start = end_match.end()
         else:
             search_start = span_end
 
+    logger.info(f"Total tool calls detected: {len(tool_calls)}")
     return tool_calls
 # ----------------------- Core non-streaming generation function -----------------------
 

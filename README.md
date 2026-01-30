@@ -92,23 +92,18 @@ pip install -r requirements.txt
 ### Running the Gateway
 
 ```bash
-# Using the modular entry point (recommended)
 python main.py
-
-# Or using the legacy single-file version
-python oci-anthropic-gateway.py
 ```
 
-The gateway runs on `0.0.0.0:8001` by default.
+The gateway runs on `0.0.0.0:8000` by default.
 
 ## Architecture
 
-The codebase has been refactored from a single 2000+ line file into a modular structure for better maintainability:
+The codebase is organized in a modular structure for better maintainability:
 
 ```
 oci-anthropic-gateway/
-├── main.py                      # Modern entry point
-├── oci-anthropic-gateway.py     # Legacy single-file (backward compatible)
+├── main.py                      # Application entry point
 ├── config.json                  # Configuration
 ├── src/
 │   ├── config/                  # Configuration management
@@ -119,11 +114,13 @@ oci-anthropic-gateway/
 │   │   ├── tools.py            # Tool calling conversion
 │   │   ├── cache.py            # Cache control utilities
 │   │   ├── json_helper.py      # JSON parsing and fixing
+│   │   ├── logging_config.py   # Logging configuration
 │   │   └── content_converter.py # Content format conversion
 │   ├── services/                # Business logic
 │   │   └── generation.py       # OCI generation service
 │   └── routes/                  # API routes
 │       └── handlers.py         # Request handlers
+├── test/                        # Test suite (all tests go here)
 └── requirements.txt
 ```
 
@@ -137,6 +134,7 @@ oci-anthropic-gateway/
 | **utils/tools.py** | Convert Anthropic tools to OCI/Cohere format, build tool instructions |
 | **utils/json_helper.py** | Parse and fix malformed JSON from models |
 | **utils/content_converter.py** | Convert between Anthropic, OCI, and Cohere formats |
+| **utils/logging_config.py** | Logging configuration with flexible levels |
 | **services/generation.py** | Core generation logic (streaming & non-streaming) |
 | **routes/handlers.py** | FastAPI route handlers |
 
@@ -296,7 +294,7 @@ Array format with cache control:
 #### 2. Streaming
 
 ```bash
-curl -X POST http://localhost:8001/v1/messages \
+curl -X POST http://localhost:8000/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-3-5-sonnet-20241022",
@@ -398,7 +396,7 @@ Echoed in response.
 #### 8. Token Counting
 
 ```bash
-curl -X POST http://localhost:8001/v1/messages/count_tokens \
+curl -X POST http://localhost:8000/v1/messages/count_tokens \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-3-5-sonnet-20241022",
@@ -591,25 +589,59 @@ httpx>=0.25.0
 python-dotenv>=1.0.0
 ```
 
+## Testing
+
+The project includes a comprehensive test suite in the `test/` directory.
+
+### Running Tests
+
+```bash
+# Run individual tests
+PYTHONPATH=. python -m test.01_event_logging
+PYTHONPATH=. python -m test.02_count_tokens
+PYTHONPATH=. python -m test.03_messages_non_stream
+PYTHONPATH=. python -m test.04_messages_stream_sse
+PYTHONPATH=. python -m test.05_tools_non_stream_and_tool_result_loop
+
+# Or with environment variables
+GATEWAY_BASE_URL=http://localhost:8000 GATEWAY_MODEL=your-model PYTHONPATH=. python -m test.03_messages_non_stream
+```
+
+### Test Configuration
+
+Tests use the following configuration:
+- **Base URL**: `GATEWAY_BASE_URL` (default: `http://localhost:8000`)
+- **Model**: `GATEWAY_MODEL` (default: from `config.json` `default_model`)
+
+### Adding New Tests
+
+**All new tests must be placed in the `test/` directory.**
+
+Test file naming convention: `NN_description.py` (where `NN` is a two-digit number)
+
+Example test structure:
+```python
+# test/06_your_new_test.py
+import asyncio
+import httpx
+from test._common import load_test_config, assert_is_anthropic_message, print_ok
+
+async def main() -> None:
+    cfg = load_test_config()
+    url = f"{cfg.base_url}/v1/messages"
+    # Your test logic here
+    print_ok("your_test_name")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 ## Security Notes
 
 - `config.json` is in `.gitignore` - never commit it
 - Use OCI IAM policies to restrict model access
 - Consider implementing authentication for production
 - Monitor token usage and costs
-
-## Migration from Single-File Version
-
-The original `oci-anthropic-gateway.py` remains functional for backward compatibility. To migrate:
-
-1. **Test the new version:**
-   ```bash
-   python main.py
-   ```
-
-2. **Update any scripts** that reference the old file
-
-3. **Keep using old version** if needed - both work identically
 
 ## Future Enhancements
 
@@ -625,8 +657,10 @@ Planned improvements:
 Contributions welcome! Please:
 1. Fork the repository
 2. Create a feature branch
-3. Add tests for new functionality
+3. Add tests for new functionality in the `test/` directory
 4. Submit a pull request
+
+**Note**: All new tests must be placed in the `test/` directory following the naming convention `NN_description.py`.
 
 ## License
 
@@ -660,5 +694,5 @@ For issues, questions, or contributions:
 
 ---
 
-**Last Updated**: 2026-01-24  
-**Version**: 2.0 (Modular Architecture with Enhanced Tool Support)
+**Last Updated**: 2026-01-30
+**Version**: 2.1 (Modular Architecture with Enhanced Tool Support)

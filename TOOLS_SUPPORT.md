@@ -332,5 +332,5 @@ If you find room for improvement or encounter specific edge cases, please submit
 
 ---
 
-**最后更新** (Last Updated): 2026-01-24
-**版本** (Version): 1.0
+**最后更新** (Last Updated): 2026-01-30
+**版本** (Version): 1.1

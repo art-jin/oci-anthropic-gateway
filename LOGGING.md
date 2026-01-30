@@ -54,7 +54,7 @@ LOG_LEVEL=DEBUG python main.py
 INFO:oci-gateway:Config loaded. Default model: xai.grok-code-fast-1
 INFO:oci-gateway:OCI SDK initialized successfully
 INFO:     Started server process [12345]
-INFO:     Uvicorn running on http://0.0.0.0:8001
+INFO:     Uvicorn running on http://0.0.0.0:8000
 ```
 
 ### INFO (Default - Recommended)

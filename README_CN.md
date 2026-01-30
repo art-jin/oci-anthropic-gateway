@@ -92,23 +92,18 @@ pip install -r requirements.txt
 ### 运行网关
 
 ```bash
-# 使用模块化入口点（推荐）
 python main.py
-
-# 或使用传统单文件版本
-python oci-anthropic-gateway.py
 ```
 
-网关默认运行在 `0.0.0.0:8001`。
+网关默认运行在 `0.0.0.0:8000`。
 
 ## 架构
 
-代码库已从单文件 2000+ 行重构为模块化结构，以提高可维护性：
+代码库采用模块化结构组织，以提高可维护性：
 
 ```
 oci-anthropic-gateway/
-├── main.py                      # 现代入口点
-├── oci-anthropic-gateway.py     # 传统单文件版本（向后兼容）
+├── main.py                      # 应用入口点
 ├── config.json                  # 配置文件
 ├── src/
 │   ├── config/                  # 配置管理
@@ -119,11 +114,13 @@ oci-anthropic-gateway/
 │   │   ├── tools.py            # 工具调用转换
 │   │   ├── cache.py            # 缓存控制工具
 │   │   ├── json_helper.py      # JSON 解析和修复
+│   │   ├── logging_config.py   # 日志配置
 │   │   └── content_converter.py # 内容格式转换
 │   ├── services/                # 业务逻辑
 │   │   └── generation.py       # OCI 生成服务
 │   └── routes/                  # API 路由
 │       └── handlers.py         # 请求处理器
+├── test/                        # 测试套件（所有测试都放在这里）
 └── requirements.txt
 ```
 
@@ -137,6 +134,7 @@ oci-anthropic-gateway/
 | **utils/tools.py** | 将 Anthropic 工具转换为 OCI/Cohere 格式，构建工具指令 |
 | **utils/json_helper.py** | 解析和修复模型输出的畸形 JSON |
 | **utils/content_converter.py** | 在 Anthropic、OCI 和 Cohere 格式之间转换 |
+| **utils/logging_config.py** | 日志配置，支持灵活的级别控制 |
 | **services/generation.py** | 核心生成逻辑（流式和非流式） |
 | **routes/handlers.py** | FastAPI 路由处理器 |
 
@@ -296,7 +294,7 @@ oci-anthropic-gateway/
 #### 2. 流式传输
 
 ```bash
-curl -X POST http://localhost:8001/v1/messages \
+curl -X POST http://localhost:8000/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-3-5-sonnet-20241022",
@@ -398,7 +396,7 @@ curl -X POST http://localhost:8001/v1/messages \
 #### 8. Token 计数
 
 ```bash
-curl -X POST http://localhost:8001/v1/messages/count_tokens \
+curl -X POST http://localhost:8000/v1/messages/count_tokens \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-3-5-sonnet-20241022",
@@ -591,25 +589,59 @@ httpx>=0.25.0
 python-dotenv>=1.0.0
 ```
 
+## 测试
+
+项目在 `test/` 目录中包含完整的测试套件。
+
+### 运行测试
+
+```bash
+# 运行单个测试
+PYTHONPATH=. python -m test.01_event_logging
+PYTHONPATH=. python -m test.02_count_tokens
+PYTHONPATH=. python -m test.03_messages_non_stream
+PYTHONPATH=. python -m test.04_messages_stream_sse
+PYTHONPATH=. python -m test.05_tools_non_stream_and_tool_result_loop
+
+# 或使用环境变量
+GATEWAY_BASE_URL=http://localhost:8000 GATEWAY_MODEL=your-model PYTHONPATH=. python -m test.03_messages_non_stream
+```
+
+### 测试配置
+
+测试使用以下配置：
+- **基础 URL**: `GATEWAY_BASE_URL`（默认: `http://localhost:8000`）
+- **模型**: `GATEWAY_MODEL`（默认: 来自 `config.json` 的 `default_model`）
+
+### 添加新测试
+
+**所有新测试必须放在 `test/` 目录中。**
+
+测试文件命名约定：`NN_描述.py`（其中 `NN` 是两位数字编号）
+
+测试结构示例：
+```python
+# test/06_your_new_test.py
+import asyncio
+import httpx
+from test._common import load_test_config, assert_is_anthropic_message, print_ok
+
+async def main() -> None:
+    cfg = load_test_config()
+    url = f"{cfg.base_url}/v1/messages"
+    # 你的测试逻辑
+    print_ok("your_test_name")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 ## 安全注意事项
 
 - `config.json` 在 `.gitignore` 中 - 永远不要提交它
 - 使用 OCI IAM 策略限制模型访问
 - 考虑为生产环境实现身份验证
 - 监控 token 使用和成本
-
-## 从单文件版本迁移
-
-原始的 `oci-anthropic-gateway.py` 保持功能正常以实现向后兼容。要迁移：
-
-1. **测试新版本：**
-   ```bash
-   python main.py
-   ```
-
-2. **更新任何脚本**引用旧文件
-
-3. **如需要可继续使用旧版本** - 两者工作方式完全相同
 
 ## 未来增强
 
@@ -625,8 +657,10 @@ python-dotenv>=1.0.0
 欢迎贡献！请：
 1. Fork 仓库
 2. 创建功能分支
-3. 为新功能添加测试
+3. 在 `test/` 目录中为新功能添加测试
 4. 提交拉取请求
+
+**注意**：所有新测试必须放在 `test/` 目录中，遵循命名约定 `NN_描述.py`。
 
 ## 许可证
 
@@ -673,5 +707,5 @@ limitations under the License.
 
 ---
 
-**最后更新**：2026-01-24
-**版本**：2.0（模块化架构，增强工具支持）
+**最后更新**：2026-01-30
+**版本**：2.1（模块化架构，增强工具支持）

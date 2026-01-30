@@ -258,7 +258,8 @@ def extract_tool_calls_from_cohere_response(cohere_response) -> Optional[List[di
 
 def convert_content_to_cohere_message(
     content: Union[str, List[dict]],
-    role: str
+    role: str,
+    tool_use_id_to_name: dict = None
 ) -> Union[
     oci.generative_ai_inference.models.CohereUserMessage,
     oci.generative_ai_inference.models.CohereChatBotMessage,
@@ -275,11 +276,16 @@ def convert_content_to_cohere_message(
     Args:
         content: Anthropic format content (string or list of blocks)
         role: Message role ("user" or "assistant")
+        tool_use_id_to_name: Optional dict mapping tool_use_id to tool_name for context
 
     Returns:
         CohereUserMessage, CohereChatBotMessage, or CohereToolMessage
     """
     role_upper = role.upper()
+
+    # Initialize tool_use_id_to_name if not provided
+    if tool_use_id_to_name is None:
+        tool_use_id_to_name = {}
 
     # Extract text from content
     text_parts = []
@@ -298,7 +304,13 @@ def convert_content_to_cohere_message(
             elif block_type == "tool_use":
                 # Convert tool_use to CohereToolCall
                 name = block.get("name", "")
+                tool_use_id = block.get("id", "")
                 input_data = block.get("input", {})
+
+                # Store the mapping for future tool_result references
+                if tool_use_id and name:
+                    tool_use_id_to_name[tool_use_id] = name
+
                 tool_calls.append(oci.generative_ai_inference.models.CohereToolCall(
                     name=name,
                     parameters=input_data
@@ -309,10 +321,14 @@ def convert_content_to_cohere_message(
                 tool_use_id = block.get("tool_use_id", "")
                 result = block.get("content", block.get("result", ""))
 
-                # Find corresponding tool call name (might need context)
-                # For now, use a placeholder name
+                # Find corresponding tool call name from context
+                tool_name = tool_use_id_to_name.get(tool_use_id) if tool_use_id else None
+                if not tool_name:
+                    # Fallback to name field in block, or unknown
+                    tool_name = block.get("name", "unknown")
+
                 tool_call_ref = oci.generative_ai_inference.models.CohereToolCall(
-                    name=block.get("name", "unknown"),
+                    name=tool_name,
                     parameters={}
                 )
 
@@ -376,11 +392,14 @@ def convert_anthropic_messages_to_cohere(
     if not messages:
         return "", [], system_message
 
+    # Maintain tool_use_id to tool_name mapping for context across messages
+    tool_use_id_to_name = {}
+
     # Process all messages except the last one as chat history
     for msg in messages[:-1]:
         role = msg.get("role", "user")
         content = msg.get("content", "")
-        cohere_msg = convert_content_to_cohere_message(content, role)
+        cohere_msg = convert_content_to_cohere_message(content, role, tool_use_id_to_name)
         chat_history.append(cohere_msg)
 
     # The last message is the current message

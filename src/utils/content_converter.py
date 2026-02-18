@@ -9,6 +9,24 @@ import oci
 
 logger = logging.getLogger("oci-gateway")
 
+TOOL_NAME_ALIASES = {
+    "web_search": "WebSearch",
+    "websearch": "WebSearch",
+    "read_file": "Read",
+    "ask_user_question": "AskUserQuestion",
+}
+
+def normalize_tool_name(name: str) -> str:
+    if not name:
+        return name
+    k = name.strip().replace("-", "_")
+    return TOOL_NAME_ALIASES.get(k, TOOL_NAME_ALIASES.get(k.lower(), name))
+
+def normalize_tool_input(tool_name: str, tool_input: dict) -> dict:
+    if tool_name == "AskUserQuestion" and isinstance(tool_input, dict):
+        if "questions" not in tool_input and "question" in tool_input:
+            return {"questions": [tool_input["question"]]}
+    return tool_input
 
 def convert_content_to_oci(content: Union[str, List[dict]]) -> Union[str, List]:
     """
@@ -118,9 +136,12 @@ def convert_content_to_oci(content: Union[str, List[dict]]) -> Union[str, List]:
         elif block_type == "tool_use":
             # Convert tool_use to text format for OCI
             # Format: <TOOL_CALL>{"name": "tool_name", "input": {...}}</TOOL_CALL>
-            name = block.get("name", "")
-            input_data = block.get("input", {})
-            tool_call_json = json.dumps({"name": name, "input": input_data})
+            #name = block.get("name", "")
+            #input_data = block.get("input", {})
+            name = normalize_tool_name(block.get("name"))
+            tool_input = block.get("input", {}) or {}
+            tool_input = normalize_tool_input(name, tool_input)
+            tool_call_json = json.dumps({"name": name, "input": tool_input}, ensure_ascii=False)
             text_parts.append(f"<TOOL_CALL>{tool_call_json}</TOOL_CALL>")
 
         else:
@@ -175,11 +196,14 @@ def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
                     logger.warning(f"Failed to parse arguments for tool call {i} ({name}): {e}")
                     input_data = {}
 
+                norm_name = normalize_tool_name(name)
+                norm_input = normalize_tool_input(norm_name, input_data)
+
                 tool_calls.append({
                     "type": "tool_use",
                     "id": f"toolu_{uuid.uuid4().hex[:24]}",
-                    "name": name,
-                    "input": input_data
+                    "name": norm_name,
+                    "input": norm_input
                 })
             else:
                 logger.warning(f"Tool call {i} missing 'function' attribute")
@@ -199,11 +223,14 @@ def extract_tool_calls_from_oci_response(chat_response) -> Optional[List[dict]]:
                     logger.warning(f"Failed to parse arguments for tool call {i} ({name}): {e}")
                     input_data = {}
 
+                norm_name = normalize_tool_name(name)
+                norm_input = normalize_tool_input(norm_name, input_data)
+
                 tool_calls.append({
                     "type": "tool_use",
                     "id": f"toolu_{uuid.uuid4().hex[:24]}",
-                    "name": name,
-                    "input": input_data
+                    "name": norm_name,
+                    "input": norm_input
                 })
             else:
                 logger.warning(f"Tool call {i} missing 'function' attribute")
@@ -258,8 +285,7 @@ def extract_tool_calls_from_cohere_response(cohere_response) -> Optional[List[di
 
 def convert_content_to_cohere_message(
     content: Union[str, List[dict]],
-    role: str,
-    tool_use_id_to_name: dict = None
+    role: str
 ) -> Union[
     oci.generative_ai_inference.models.CohereUserMessage,
     oci.generative_ai_inference.models.CohereChatBotMessage,
@@ -276,16 +302,11 @@ def convert_content_to_cohere_message(
     Args:
         content: Anthropic format content (string or list of blocks)
         role: Message role ("user" or "assistant")
-        tool_use_id_to_name: Optional dict mapping tool_use_id to tool_name for context
 
     Returns:
         CohereUserMessage, CohereChatBotMessage, or CohereToolMessage
     """
     role_upper = role.upper()
-
-    # Initialize tool_use_id_to_name if not provided
-    if tool_use_id_to_name is None:
-        tool_use_id_to_name = {}
 
     # Extract text from content
     text_parts = []
@@ -304,13 +325,7 @@ def convert_content_to_cohere_message(
             elif block_type == "tool_use":
                 # Convert tool_use to CohereToolCall
                 name = block.get("name", "")
-                tool_use_id = block.get("id", "")
                 input_data = block.get("input", {})
-
-                # Store the mapping for future tool_result references
-                if tool_use_id and name:
-                    tool_use_id_to_name[tool_use_id] = name
-
                 tool_calls.append(oci.generative_ai_inference.models.CohereToolCall(
                     name=name,
                     parameters=input_data
@@ -321,14 +336,10 @@ def convert_content_to_cohere_message(
                 tool_use_id = block.get("tool_use_id", "")
                 result = block.get("content", block.get("result", ""))
 
-                # Find corresponding tool call name from context
-                tool_name = tool_use_id_to_name.get(tool_use_id) if tool_use_id else None
-                if not tool_name:
-                    # Fallback to name field in block, or unknown
-                    tool_name = block.get("name", "unknown")
-
+                # Find corresponding tool call name (might need context)
+                # For now, use a placeholder name
                 tool_call_ref = oci.generative_ai_inference.models.CohereToolCall(
-                    name=tool_name,
+                    name=block.get("name", "unknown"),
                     parameters={}
                 )
 
@@ -392,14 +403,11 @@ def convert_anthropic_messages_to_cohere(
     if not messages:
         return "", [], system_message
 
-    # Maintain tool_use_id to tool_name mapping for context across messages
-    tool_use_id_to_name = {}
-
     # Process all messages except the last one as chat history
     for msg in messages[:-1]:
         role = msg.get("role", "user")
         content = msg.get("content", "")
-        cohere_msg = convert_content_to_cohere_message(content, role, tool_use_id_to_name)
+        cohere_msg = convert_content_to_cohere_message(content, role)
         chat_history.append(cohere_msg)
 
     # The last message is the current message
@@ -442,11 +450,13 @@ def detect_tool_call_in_text(text: str) -> Optional[dict]:
         arguments = match.group(2)
         try:
             input_data = json.loads(arguments)
+            norm_name = normalize_tool_name(name)
+            norm_input = normalize_tool_input(norm_name, input_data)
             return {
                 "type": "tool_use",
                 "id": f"toolu_{uuid.uuid4().hex[:24]}",
-                "name": name,
-                "input": input_data
+                "name": norm_name,
+                "input": norm_input
             }
         except json.JSONDecodeError:
             pass

@@ -176,10 +176,10 @@ User: "Search for Python tutorials and then read the README.md file"
 
 Your response:
 <TOOL_CALL>
-{"name": "web_search", "input": {"query": "Python tutorials"}}
+{"name": "WebSearch", "input": {"query": "Python tutorials"}}
 </TOOL_CALL>
 <TOOL_CALL>
-{"name": "read_file", "input": {"file_path": "README.md"}}
+{"name": "Read", "input": {"file_path": "README.md"}}
 </TOOL_CALL>
 
 **Example 3 - Tool with complex parameters:**
@@ -227,13 +227,13 @@ Your response:
 ❌ WRONG - Including explanatory text with tool calls:
 "I'll search for that information for you.
 <TOOL_CALL>
-{"name": "web_search", "input": {"query": "information"}}
+{"name": "WebSearch", "input": {"query": "information"}}
 </TOOL_CALL>
 Let me know if you need anything else!"
 
 ✓ CORRECT - Only tool call, no extra text:
 <TOOL_CALL>
-{"name": "web_search", "input": {"query": "information"}}
+{"name": "WebSearch", "input": {"query": "information"}}
 </TOOL_CALL>
 
 ❌ WRONG - Malformed JSON:

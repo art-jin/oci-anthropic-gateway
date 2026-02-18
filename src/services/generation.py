@@ -18,103 +18,10 @@ from ..utils.content_converter import (
     extract_tool_calls_from_cohere_response,
 )
 from ..utils.json_helper import detect_all_tool_call_blocks, detect_natural_language_tool_calls
-from ..utils.token import estimate_tokens, estimate_tokens_from_oci_messages
-
+from ..utils.token import estimate_tokens
 
 logger = logging.getLogger("oci-gateway")
 
-
-def _message_text_contains_tool_markers(msg) -> tuple[bool, bool]:
-    """
-    Return (has_tool_call, has_tool_result) by scanning concatenated text
-    for <TOOL_CALL> / <TOOL_RESULT markers.
-    """
-    content = getattr(msg, "content", None)
-    if not isinstance(content, list):
-        return (False, False)
-
-    text = ""
-    for item in content:
-        t = getattr(item, "text", None)
-        if isinstance(t, str):
-            text += t
-
-    has_call = "<TOOL_CALL>" in text
-    has_result = "<TOOL_RESULT" in text
-    return (has_call, has_result)
-
-
-def _trim_oci_messages_to_input_budget(
-        oci_messages: list,
-        input_budget_tokens: int
-) -> list:
-    """
-    Trim oldest non-SYSTEM messages until estimated input tokens <= budget.
-
-    - Keeps all SYSTEM messages.
-    - Removes oldest non-SYSTEM messages first.
-    - If a removable message is adjacent to a tool marker pair
-      (<TOOL_CALL> + <TOOL_RESULT>), remove the adjacent pair together
-      when they are consecutive.
-
-    Returns a NEW list (does not mutate input).
-    """
-    if not oci_messages:
-        return []
-
-    if input_budget_tokens <= 0:
-        # Keep SYSTEM only if budget is impossible
-        return [m for m in oci_messages if getattr(m, "role", "") == "SYSTEM"]
-
-    current_tokens = estimate_tokens_from_oci_messages(oci_messages)
-    if current_tokens <= input_budget_tokens:
-        return list(oci_messages)
-
-    # Identify indices of SYSTEM and non-SYSTEM
-    roles = [getattr(m, "role", None) for m in oci_messages]
-    system_indices = {i for i, r in enumerate(roles) if r == "SYSTEM"}
-
-    # Build removable units from oldest to newest.
-    # Each unit is a list of indices to remove together.
-    removable_units: list[list[int]] = []
-    i = 0
-    n = len(oci_messages)
-    while i < n:
-        if i in system_indices:
-            i += 1
-            continue
-
-        # Default: remove just this message
-        unit = [i]
-
-        # If this message + next message form a tool marker pair, remove both together.
-        if i + 1 < n and (i + 1) not in system_indices:
-            has_call_i, has_result_i = _message_text_contains_tool_markers(oci_messages[i])
-            has_call_next, has_result_next = _message_text_contains_tool_markers(oci_messages[i + 1])
-
-            # Adjacent pair heuristic:
-            # - call then result, or result then call (defensive)
-            if (has_call_i and has_result_next) or (has_result_i and has_call_next):
-                unit = [i, i + 1]
-                i += 2
-                removable_units.append(unit)
-                continue
-
-        removable_units.append(unit)
-        i += 1
-
-    # Iteratively remove oldest units until within budget or nothing left
-    to_remove: set[int] = set()
-    for unit in removable_units:
-        for idx in unit:
-            to_remove.add(idx)
-
-        trimmed = [m for j, m in enumerate(oci_messages) if j not in to_remove]
-        if estimate_tokens_from_oci_messages(trimmed) <= input_budget_tokens:
-            return trimmed
-
-    # If we couldn't get under budget without removing SYSTEM, return SYSTEM-only
-    return [m for j, m in enumerate(oci_messages) if j in system_indices]
 
 async def generate_oci_non_stream(
     oci_messages,
@@ -205,12 +112,10 @@ async def generate_oci_non_stream(
             if is_cohere:
                 chat_request.message = thinking_instruction + "\n\n" + chat_request.message
             else:
-                thinking_msg = oci.generative_ai_inference.models.Message(
+                oci_messages.insert(0, oci.generative_ai_inference.models.Message(
                     role="SYSTEM",
                     content=[oci.generative_ai_inference.models.TextContent(text=thinking_instruction)]
-                )
-                oci_messages = [thinking_msg, *oci_messages]
-                chat_request.messages = oci_messages
+                ))
 
     chat_request.is_stream = False
 
@@ -293,12 +198,10 @@ RULES:
 
             if tool_instruction:
                 # Insert tool instruction as first system message
-                tool_msg = oci.generative_ai_inference.models.Message(
+                oci_messages.insert(0, oci.generative_ai_inference.models.Message(
                     role="SYSTEM",
                     content=[oci.generative_ai_inference.models.TextContent(text=tool_instruction)]
-                )
-                oci_messages = [tool_msg, *oci_messages]
-                chat_request.messages = oci_messages
+                ))
                 logger.info(f"Injected tool use instruction for {len(params['tools'])} tools (Generic format)")
 
     chat_detail.chat_request = chat_request
@@ -312,25 +215,6 @@ RULES:
         raise ValueError("genai_client cannot be None")
 
     try:
-        # Enforce input context budget to avoid OCI context_length_exceeded.
-        context_window = int(model_conf.get("context_window", 272000))
-        safety_margin = int(model_conf.get("safety_margin_tokens", 4096))
-        input_budget = max(1, context_window - safety_margin - int(token_limit))
-
-        before_tokens = estimate_tokens_from_oci_messages(oci_messages)
-        trimmed_messages = _trim_oci_messages_to_input_budget(oci_messages, input_budget)
-        after_tokens = estimate_tokens_from_oci_messages(trimmed_messages)
-
-        if after_tokens < before_tokens:
-            logger.info(
-                "Trimmed OCI input messages: before=%d after=%d budget=%d (context_window=%d safety_margin=%d max_tokens=%d)",
-                before_tokens, after_tokens, input_budget, context_window, safety_margin, int(token_limit)
-            )
-
-        oci_messages = trimmed_messages
-        if not is_cohere:
-            chat_request.messages = oci_messages
-
         # Call OCI (non-streaming) - run in thread pool to avoid blocking event loop
         response = await asyncio.to_thread(genai_client.chat, chat_detail)
 
@@ -476,7 +360,7 @@ RULES:
             elif block.get("type") == "tool_use":
                 text_for_estimation += json.dumps(block.get("input", {}))
         estimated_output_tokens = max(1, len(text_for_estimation) // 4)
-        estimated_input_tokens = estimate_tokens_from_oci_messages(oci_messages) if oci_messages else 0
+        estimated_input_tokens = sum(len(str(m.content)) // 4 for m in oci_messages) if oci_messages else 50
 
         # Build usage object
         usage = {
@@ -598,12 +482,10 @@ async def generate_oci_stream(
             if is_cohere:
                 chat_request.message = thinking_instruction + "\n\n" + chat_request.message
             else:
-                thinking_msg = oci.generative_ai_inference.models.Message(
+                oci_messages.insert(0, oci.generative_ai_inference.models.Message(
                     role="SYSTEM",
                     content=[oci.generative_ai_inference.models.TextContent(text=thinking_instruction)]
-                )
-                oci_messages = [thinking_msg, *oci_messages]
-                chat_request.messages = oci_messages
+                ))
 
     chat_request.is_stream = True
 
@@ -675,12 +557,10 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
 
             if tool_instruction:
                 # Insert tool instruction as first system message
-                tool_msg = oci.generative_ai_inference.models.Message(
+                oci_messages.insert(0, oci.generative_ai_inference.models.Message(
                     role="SYSTEM",
                     content=[oci.generative_ai_inference.models.TextContent(text=tool_instruction)]
-                )
-                oci_messages = [tool_msg, *oci_messages]
-                chat_request.messages = oci_messages
+                ))
                 logger.info(f"Injected tool use instruction for streaming ({len(params['tools'])} tools, Generic format)")
 
     chat_detail.chat_request = chat_request
@@ -719,25 +599,6 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
             'index': 0,
             'content_block': {'type': 'text', 'text': ''}
         })}\n\n"
-
-        # Enforce input context budget to avoid OCI context_length_exceeded.
-        context_window = int(model_conf.get("context_window", 272000))
-        safety_margin = int(model_conf.get("safety_margin_tokens", 4096))
-        input_budget = max(1, context_window - safety_margin - int(token_limit))
-
-        before_tokens = estimate_tokens_from_oci_messages(oci_messages)
-        trimmed_messages = _trim_oci_messages_to_input_budget(oci_messages, input_budget)
-        after_tokens = estimate_tokens_from_oci_messages(trimmed_messages)
-
-        if after_tokens < before_tokens:
-            logger.info(
-                "Trimmed OCI input messages (stream): before=%d after=%d budget=%d (context_window=%d safety_margin=%d max_tokens=%d)",
-                before_tokens, after_tokens, input_budget, context_window, safety_margin, int(token_limit)
-            )
-
-        oci_messages = trimmed_messages
-        if not is_cohere:
-            chat_request.messages = oci_messages
 
         # Call OCI - run in thread pool to avoid blocking event loop
         response = await asyncio.to_thread(genai_client.chat, chat_detail)
@@ -917,7 +778,7 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
             },
             'usage': {
                 'output_tokens': estimated_output_tokens,
-                'input_tokens': estimate_tokens_from_oci_messages(oci_messages) if oci_messages else 0
+                'input_tokens': 50
             }
         })}\n\n"
 
@@ -926,4 +787,14 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
 
     except Exception as e:
         logger.exception("Streaming output exception")
-        yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'message': 'An internal error occurred. Please check the logs for details.'}})}\n\n"
+        error_str = str(e).lower()
+        is_retryable = "timeout" in error_str or "connection" in error_str
+        error_type = "timeout_error" if "timeout" in error_str else "internal_error"
+        yield f"event: error\ndata: {json.dumps({
+            'type': 'error',
+            'error': {
+                'type': error_type,
+                'message': 'Request timed out. Please retry.' if is_retryable else 'An internal error occurred. Please check the logs for details.',
+                'retryable': is_retryable
+            }
+        })}\n\n"

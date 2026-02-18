@@ -74,7 +74,7 @@ class Config:
                 config=sdk_config,
                 service_endpoint=self.endpoint,
                 retry_strategy=oci.retry.NoneRetryStrategy(),
-                timeout=(10, 240)
+                timeout=(10, 360)
             )
             logger.info("OCI SDK initialized successfully")
         except Exception as e:

@@ -9,7 +9,8 @@ DEFAULT_MAX_TOKENS = 131070  # Maximum tokens for generation (65535 * 2)
 MIN_JSON_LENGTH = 10  # Minimum valid JSON length for tool calls
 
 # Precompiled regex patterns for tool call detection (performance optimization)
-_TOOL_CALL_START_PATTERN = re.compile(r'<TOOL_CALL\s*>', re.IGNORECASE)
+# Supports <TOOL_CALL>, <TOOL_CALL >, <TOOL_CALL attributes...>
+_TOOL_CALL_START_PATTERN = re.compile(r'<TOOL_CALL(?:\s[^>]*)?>', re.IGNORECASE)
 _TOOL_CALL_END_PATTERN = re.compile(r'</TOOL_CALL\s*>', re.IGNORECASE)
 
 # --- API Response Types ---

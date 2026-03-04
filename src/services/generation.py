@@ -78,7 +78,8 @@ async def generate_oci_non_stream(
     genai_client,
     cohere_messages=None,
     *,
-    debug_enabled: bool = False
+    debug_enabled: bool = False,
+    trace_ctx: Optional[dict] = None,
 ):
     """
     Generate non-streaming response from OCI GenAI and format it as Anthropic-compatible JSON.
@@ -92,6 +93,16 @@ async def generate_oci_non_stream(
         genai_client: OCI GenAI client instance
         cohere_messages: Tuple of (current_message, chat_history, system_message) for Cohere format, or None
     """
+    trace_ctx = trace_ctx or {}
+    response_metadata = params.get("metadata")
+    if not isinstance(response_metadata, dict):
+        response_metadata = {}
+    if trace_ctx.get("session_id") and "session_id" not in response_metadata:
+        response_metadata["session_id"] = trace_ctx.get("session_id")
+    if trace_ctx.get("request_id") and "request_id" not in response_metadata:
+        response_metadata["request_id"] = trace_ctx.get("request_id")
+    params["metadata"] = response_metadata
+
     chat_detail = oci.generative_ai_inference.models.ChatDetails()
 
     # Determine API format from model configuration
@@ -280,6 +291,7 @@ RULES:
                     "params_keys": sorted(list(params.keys())),
                     "oci_messages_summary": _summarize_request_messages(oci_messages),
                 },
+                trace_ctx=trace_ctx,
             )
         except Exception:
             pass
@@ -365,12 +377,14 @@ RULES:
                                 **_has_tool_call_markers(text_to_check),
                                 "raw_text": text_to_check,
                             },
+                            trace_ctx=trace_ctx,
                         )
                         write_debug_dump(
                             debug_conf,
                             message_id,
                             "tool_detection_primary",
                             {"detected": tool_calls_in_text},
+                            trace_ctx=trace_ctx,
                         )
                     
                     # If no tool calls found with primary method and we have tools, try natural language fallback
@@ -391,6 +405,7 @@ RULES:
                                     "available_tools_sample": tool_names[:50],
                                     "detected": tool_calls_in_text,
                                 },
+                                trace_ctx=trace_ctx,
                             )
                     
                     if tool_calls_in_text:
@@ -496,6 +511,7 @@ RULES:
                     "content_types": [b.get("type") for b in (content_blocks or []) if isinstance(b, dict)],
                     "response_content": json.dumps(content_blocks or [], ensure_ascii=False),
                 },
+                trace_ctx=trace_ctx,
             )
 
         return JSONResponse(content=anthropic_response)
@@ -523,7 +539,8 @@ async def generate_oci_stream(
     genai_client,
     cohere_messages=None,
     *,
-    debug_enabled: bool = False
+    debug_enabled: bool = False,
+    trace_ctx: Optional[dict] = None,
 ):
     """
     Generate streaming response from OCI GenAI and format it as Anthropic-compatible SSE.
@@ -537,6 +554,16 @@ async def generate_oci_stream(
         genai_client: OCI GenAI client instance
         cohere_messages: Tuple of (current_message, chat_history, system_message) for Cohere format, or None
     """
+    trace_ctx = trace_ctx or {}
+    response_metadata = params.get("metadata")
+    if not isinstance(response_metadata, dict):
+        response_metadata = {}
+    if trace_ctx.get("session_id") and "session_id" not in response_metadata:
+        response_metadata["session_id"] = trace_ctx.get("session_id")
+    if trace_ctx.get("request_id") and "request_id" not in response_metadata:
+        response_metadata["request_id"] = trace_ctx.get("request_id")
+    params["metadata"] = response_metadata
+
     logger.debug(f"generate_oci_stream called with genai_client={genai_client is not None}, model_conf ocid={model_conf.get('ocid', 'MISSING')}")
 
     chat_detail = oci.generative_ai_inference.models.ChatDetails()
@@ -707,6 +734,7 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
                     "params_keys": sorted(list(params.keys())),
                     "oci_messages_summary": _summarize_request_messages(oci_messages),
                 },
+                trace_ctx=trace_ctx,
             )
         except Exception:
             pass
@@ -839,12 +867,14 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
                             **_has_tool_call_markers(accumulated_text),
                             "accumulated_text": accumulated_text,
                         },
+                        trace_ctx=trace_ctx,
                     )
                     write_debug_dump(
                         debug_conf,
                         message_id,
                         "stream_tool_detection_primary",
                         {"detected": tool_calls_in_text},
+                        trace_ctx=trace_ctx,
                     )
                 if tool_calls_in_text:
                     # Remove all tool call blocks from the accumulated text

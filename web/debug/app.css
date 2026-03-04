@@ -1,0 +1,134 @@
+:root {
+  --bg: #f2efe7;
+  --surface: #fffdf8;
+  --ink: #1f2a2e;
+  --ink-soft: #58656b;
+  --line: #d8d1c3;
+  --accent: #0f766e;
+  --accent-soft: #d5efeb;
+  --danger: #b42318;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", sans-serif;
+  background: radial-gradient(circle at 10% 10%, #fff8ec 0%, var(--bg) 55%, #ebe7de 100%);
+  color: var(--ink);
+}
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: linear-gradient(90deg, #fefbf3, #f3f7f7);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 20px;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: 0.2px;
+}
+
+.layout {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.04);
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+input, button {
+  font: inherit;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  background: #fff;
+}
+
+button {
+  cursor: pointer;
+  background: var(--accent-soft);
+  border-color: #9fd5ce;
+}
+
+button:hover { background: #c6e9e3; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th, .table td {
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 8px;
+  vertical-align: top;
+  font-size: 14px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: #f1f5f8;
+  border: 1px solid #d8e0e8;
+}
+
+.badge.ok { background: #ddf5e7; border-color: #9cd9b4; }
+.badge.warn { background: #fff2dd; border-color: #f0d3a0; }
+.badge.err { background: #fde7e7; border-color: #efb7b7; color: var(--danger); }
+
+.meta {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.timeline-item {
+  border-left: 3px solid #c5dbd8;
+  margin-left: 8px;
+  padding: 4px 0 10px 12px;
+}
+
+.json {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 12px;
+  border-radius: 10px;
+  overflow-x: auto;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+  font-size: 12px;
+  max-height: 460px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+@media (min-width: 980px) {
+  .grid.two {
+    grid-template-columns: 1fr 1fr;
+  }
+}

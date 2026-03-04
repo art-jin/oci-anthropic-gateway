@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Session Timeline</title>
+  <link rel="stylesheet" href="/debug/app.css" />
+</head>
+<body>
+  <div class="header"><h1 id="title">Session Timeline</h1></div>
+  <div class="layout">
+    <div class="card">
+      <div class="controls">
+        <a href="/debug/index.html">← Sessions</a>
+        <input id="page" type="number" min="1" value="1" style="width: 100px" />
+        <input id="size" type="number" min="1" max="500" value="50" style="width: 100px" />
+        <button id="loadBtn">Reload</button>
+      </div>
+      <div class="meta" id="meta"></div>
+      <div id="timeline"></div>
+    </div>
+  </div>
+
+  <script src="/debug/common.js"></script>
+  <script>
+    const sessionId = qs('session_id') || '';
+    document.getElementById('title').textContent = `Session Timeline: ${sessionId}`;
+
+    async function loadTimeline() {
+      const page = Number(document.getElementById('page').value || 1);
+      const size = Number(document.getElementById('size').value || 50);
+      const data = await api(`/sessions/${encodeURIComponent(sessionId)}/messages?page=${page}&size=${size}`);
+      document.getElementById('meta').textContent = `total=${data.total}, page=${data.page}, size=${data.size}`;
+
+      const root = document.getElementById('timeline');
+      root.innerHTML = data.items.map(it => {
+        const stream = it.stream === 1 ? '<span class="badge">stream</span>' : '<span class="badge">non-stream</span>';
+        const tool = `<span class="${badgeClass(it.has_tool_call)}">tool_call=${it.has_tool_call ?? '-'}</span>`;
+        return `
+          <div class="timeline-item">
+            <div>
+              <a href="/debug/message.html?message_id=${encodeURIComponent(it.message_id)}">${esc(it.message_id)}</a>
+            </div>
+            <div class="meta">
+              ${stream} ${tool}
+              model=${esc(it.model || '-')} api=${esc(it.api_format || '-')} stop=${esc(it.stop_reason || '-')}
+              dumps=${esc(it.dump_count)} ts=${esc(it.ts)}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    document.getElementById('loadBtn').addEventListener('click', () => {
+      loadTimeline().catch(err => alert(err.message));
+    });
+
+    loadTimeline().catch(err => alert(err.message));
+  </script>
+</body>
+</html>

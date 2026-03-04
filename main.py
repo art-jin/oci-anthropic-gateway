@@ -11,9 +11,11 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Optional, Union, List
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 import oci
 import uvicorn
 
@@ -30,7 +32,44 @@ app = FastAPI(title="OCI GenAI Anthropic Gateway")
 # Import from refactored modules
 from src.config import init_config, get_config
 from src.routes import handle_count_tokens, handle_messages_request
+from src.debug import debug_router, DebugDumpIndexer
 from src.utils.constants import DEFAULT_MAX_TOKENS
+
+app.include_router(debug_router, prefix="/debug/api")
+_debug_ui_dir = Path("web/debug")
+if _debug_ui_dir.exists():
+    app.mount("/debug", StaticFiles(directory=str(_debug_ui_dir), html=True), name="debug-ui")
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        cfg = init_config("config.json")
+
+    if cfg.debug_ui_enabled:
+        indexer = DebugDumpIndexer(
+            dump_dir=cfg.debug_ui_dump_dir,
+            db_path=cfg.debug_ui_index_db,
+            scan_interval_sec=cfg.debug_ui_scan_interval_sec,
+        )
+        app.state.debug_indexer = indexer
+        app.state.debug_indexer_task = asyncio.create_task(indexer.run_forever())
+    else:
+        app.state.debug_indexer = None
+        app.state.debug_indexer_task = None
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    task = getattr(app.state, "debug_indexer_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 @app.post("/{path:path}")

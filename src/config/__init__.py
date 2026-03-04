@@ -31,6 +31,12 @@ class Config:
         self.default_model_conf: Dict[str, Any] = {}
         self.genai_client: Optional[oci.generative_ai_inference.GenerativeAiInferenceClient] = None
         self.debug: bool = False
+        self.debug_ui_enabled: bool = False
+        self.debug_ui_dump_dir: str = "debug_dumps"
+        self.debug_ui_index_db: str = "debug_dumps/index.db"
+        self.debug_ui_scan_interval_sec: int = 3
+        self.debug_ui_auth_mode: str = "none"
+        self.debug_ui_max_detail_bytes: int = 2_000_000
         self.server_host: str = "127.0.0.1"
         self.server_port: int = 8000
         self.server_log_level: str = "warning"
@@ -54,6 +60,13 @@ class Config:
             self.model_definitions = custom_config.get("model_definitions", {})
             self.default_model_name = custom_config.get("default_model")
             self.debug = bool(custom_config.get("debug", False))
+            debug_ui = custom_config.get("debug_ui", {})
+            self.debug_ui_enabled = bool(debug_ui.get("enabled", False))
+            self.debug_ui_dump_dir = str(debug_ui.get("dump_dir", "debug_dumps"))
+            self.debug_ui_index_db = str(debug_ui.get("index_db", "debug_dumps/index.db"))
+            self.debug_ui_scan_interval_sec = int(debug_ui.get("scan_interval_sec", 3))
+            self.debug_ui_auth_mode = str(debug_ui.get("auth_mode", "none")).strip().lower()
+            self.debug_ui_max_detail_bytes = int(debug_ui.get("max_detail_bytes", 2_000_000))
 
             server_conf = custom_config.get("server", {})
             host = server_conf.get("host", "127.0.0.1")
@@ -97,6 +110,7 @@ class Config:
 
             logger.info(
                 f"Config loaded. Default model: {self.default_model_name} (debug={self.debug}) "
+                f"debug_ui={self.debug_ui_enabled} "
                 f"server={self.server_host}:{self.server_port} log_level={self.server_log_level}"
             )
 

@@ -75,6 +75,23 @@ async def handle_messages_request(
     Returns:
         StreamingResponse or JSONResponse
     """
+    request_metadata = body.get("metadata")
+    if not isinstance(request_metadata, dict):
+        request_metadata = {}
+    session_id = request_metadata.get("session_id") or f"sess_{uuid.uuid4().hex}"
+    request_id = request_metadata.get("request_id") or f"req_{uuid.uuid4().hex}"
+    request_metadata["session_id"] = session_id
+    request_metadata["request_id"] = request_id
+    body["metadata"] = request_metadata
+
+    trace_ctx = {
+        "session_id": session_id,
+        "request_id": request_id,
+        "user_id": request_metadata.get("user_id"),
+        "tenant_id": request_metadata.get("tenant_id"),
+        "parent_message_id": request_metadata.get("parent_message_id"),
+    }
+
     tools = body.get("tools") or []
     tool_names = [t.get("name") for t in tools if isinstance(t, dict) and t.get("name")]
     logger.info("REQ stream=%s tools=%d tool_choice=%s", bool(body.get("stream")), len(tool_names),
@@ -191,6 +208,7 @@ async def handle_messages_request(
                 app_config.genai_client,
                 cohere_messages,
                 debug_enabled=bool(app_config.debug),
+                trace_ctx=trace_ctx,
             ),
             media_type="text/event-stream",
             headers={
@@ -210,6 +228,7 @@ async def handle_messages_request(
             app_config.genai_client,
             cohere_messages,
             debug_enabled=bool(app_config.debug),
+            trace_ctx=trace_ctx,
         )
 
 

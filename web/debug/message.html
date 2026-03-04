@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Message Detail</title>
+  <link rel="stylesheet" href="/debug/app.css" />
+</head>
+<body>
+  <div class="header"><h1 id="title">Message Detail</h1></div>
+  <div class="layout grid two">
+    <div class="card">
+      <div class="controls">
+        <a id="backLink" href="/debug/index.html">← Back</a>
+        <button id="loadBtn">Reload</button>
+      </div>
+      <div id="summary" class="meta"></div>
+      <h3>Dumps</h3>
+      <table class="table" id="dumpTable">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Kind</th>
+            <th>Time</th>
+            <th>Truncated</th>
+            <th>Raw</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>Kind Payloads</h3>
+      <div id="kindPayloads"></div>
+    </div>
+  </div>
+
+  <script src="/debug/common.js"></script>
+  <script>
+    const messageId = qs('message_id') || '';
+    document.getElementById('title').textContent = `Message Detail: ${messageId}`;
+
+    function renderPayloads(kindPayloads) {
+      const root = document.getElementById('kindPayloads');
+      const keys = Object.keys(kindPayloads || {});
+      root.innerHTML = keys.map(k => `
+        <div style="margin-bottom:12px;">
+          <div><span class="badge">${esc(k)}</span></div>
+          <pre class="json">${esc(fmtJson(kindPayloads[k]))}</pre>
+        </div>
+      `).join('');
+    }
+
+    async function loadMessage() {
+      const detail = await api(`/messages/${encodeURIComponent(messageId)}`);
+      const msg = detail.message;
+      const sessionId = msg.session_id;
+      document.getElementById('backLink').href = `/debug/session.html?session_id=${encodeURIComponent(sessionId)}`;
+      document.getElementById('summary').textContent =
+        `session=${msg.session_id}, request=${msg.request_id || '-'}, model=${msg.model || '-'}, stop=${msg.stop_reason || '-'}, tool_call=${msg.has_tool_call}, dumps=${msg.dump_count}`;
+
+      const tbody = document.querySelector('#dumpTable tbody');
+      tbody.innerHTML = detail.dumps.map(d => `
+        <tr>
+          <td>${esc(d.id)}</td>
+          <td>${esc(d.kind)}</td>
+          <td>${esc(d.ts)}</td>
+          <td>${esc(d.has_truncation)}</td>
+          <td><a href="/debug/api/dumps/${d.id}/raw" target="_blank">open</a></td>
+        </tr>
+      `).join('');
+
+      renderPayloads(detail.kind_payloads || {});
+    }
+
+    document.getElementById('loadBtn').addEventListener('click', () => {
+      loadMessage().catch(err => alert(err.message));
+    });
+
+    loadMessage().catch(err => alert(err.message));
+  </script>
+</body>
+</html>

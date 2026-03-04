@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -81,6 +81,7 @@ def write_debug_dump(
     message_id: str,
     kind: str,
     payload: Any,
+    trace_ctx: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Write a debug dump JSON file.
 
@@ -94,12 +95,25 @@ def write_debug_dump(
         dump_root.mkdir(parents=True, exist_ok=True)
 
         safe_payload = _truncate_payload(payload, config.max_bytes)
+        trace_ctx = trace_ctx or {}
+        envelope = {
+            "schema_version": "1.1",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message_id": message_id,
+            "request_id": trace_ctx.get("request_id"),
+            "session_id": trace_ctx.get("session_id"),
+            "user_id": trace_ctx.get("user_id"),
+            "tenant_id": trace_ctx.get("tenant_id"),
+            "parent_message_id": trace_ctx.get("parent_message_id"),
+            "kind": kind,
+            "payload": safe_payload,
+        }
         ts = time.strftime("%Y%m%d-%H%M%S")
         fname = f"{ts}_{message_id}_{kind}.json"
         path = dump_root / fname
 
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(safe_payload, f, ensure_ascii=False, indent=2)
+            json.dump(envelope, f, ensure_ascii=False, indent=2)
 
         return str(path)
     except Exception as e:

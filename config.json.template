@@ -52,6 +52,14 @@
   },
   "default_model": "xai.grok-4-fast-non-reasoning",
   "debug": false,
+  "debug_ui": {
+    "enabled": false,
+    "dump_dir": "debug_dumps",
+    "index_db": "debug_dumps/index.db",
+    "scan_interval_sec": 3,
+    "auth_mode": "none",
+    "max_detail_bytes": 2000000
+  },
   "server": {
     "host": "127.0.0.1",
     "port": 8000,

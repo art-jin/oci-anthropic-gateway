@@ -313,6 +313,14 @@ When you decide to use a tool, you MUST output ONLY the tool call in this EXACT 
 6. For multiple tools, place tool call blocks one after another
 7. Ensure proper JSON formatting (commas, braces, brackets)
 
+### Long string parameters (MUST READ)
+When a tool input contains long text (e.g. `Edit.old_string`, `Edit.new_string`, code blocks, or markdown), you MUST still produce **valid JSON**:
+- Do NOT output literal newlines inside JSON strings. Use `\\n` instead.
+- If the text contains double quotes (`"`), escape them as `\\"`.
+- If you cannot keep the JSON valid due to long text, prefer splitting the operation (e.g. `Write` content to a file first, then `Edit` with smaller inputs).
+- HARD RULE: If any string field (especially `Edit.old_string`/`Edit.new_string`) exceeds 2048 characters, DO NOT send it in a single tool call JSON. Split into multiple smaller tool calls, or use `Write` (including overwriting the file if needed).
+- EDIT-SPECIFIC HARD RULE: For the `Edit` tool, if `old_string` or `new_string` exceeds 512 characters, DO NOT include it in a single tool call JSON. Split into multiple smaller `Edit` calls (<=512 chars each) or use `Write` to overwrite the file.
+
 {examples}
 
 ## Tool Results Format

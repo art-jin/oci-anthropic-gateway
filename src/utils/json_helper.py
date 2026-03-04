@@ -16,6 +16,15 @@ TOOL_NAME_ALIASES = {
     "websearch": "WebSearch",
     "read_file": "Read",
     "ask_user_question": "AskUserQuestion",
+    "read": "Read",
+    "write": "Write",
+    "edit": "Edit",
+    "multiedit": "MultiEdit",
+    "multi_edit": "MultiEdit",
+    "ls": "LS",
+    "glob": "Glob",
+    "bash": "Bash",
+    "todowrite": "TodoWrite",
 }
 
 def normalize_tool_name(name: str) -> str:
@@ -95,37 +104,27 @@ def fix_json_issues(json_str: str) -> Optional[str]:
         json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
 
         # Fix 3: Replace single quotes with double quotes for strings
-        # This is tricky - we need to be careful not to replace quotes inside strings
-        # Simple approach: replace single-quoted property names and values
-        # Match pattern: 'key': or 'value', but not inside double-quoted strings
-        # Replace single quotes around property names (at start of object or after comma)
+        # Replace single quotes around property names
         json_str = re.sub(r"'([^']+)'(\s*:)", r'"\1"\2', json_str)
-        # Replace single quotes for string values (after colon or comma)
+        # Replace single quotes for string values
         json_str = re.sub(r":\s*'([^']*)'", r': "\1"', json_str)
         json_str = re.sub(r",\s*'([^']*)'", r', "\1"', json_str)
 
         # Fix 4: Ensure all property names are quoted
-        # Match unquoted property names (word characters before colon)
-        # Pattern: word followed by colon, but not preceded by quote or bracket
-        # This is a simple heuristic - may not catch all cases
         json_str = re.sub(r'([{,]\s*)(\w+)(\s*:)', r'\1"\2"\3', json_str)
 
         # Fix 5: Fix boolean/null values that might be quoted
         json_str = re.sub(r'"(true|false|null)"', r'\1', json_str)
 
-        # Fix 6: Fix numbers that might be quoted (simple heuristic)
-        # Match quoted numbers like "123" or "12.34" but not in the middle of text
+        # Fix 6: Fix numbers that might be quoted
         json_str = re.sub(r':\s*"(\d+(?:\.\d+)?)"', r': \1', json_str)
 
         # Fix 7: Handle incomplete JSON - try to close it
-        # Count braces and brackets
         open_braces = json_str.count('{') - json_str.count('}')
         open_brackets = json_str.count('[') - json_str.count(']')
-        
         if open_braces > 0:
             json_str += '}' * open_braces
             logger.debug(f"Added {open_braces} closing braces")
-        
         if open_brackets > 0:
             json_str += ']' * open_brackets
             logger.debug(f"Added {open_brackets} closing brackets")
@@ -133,8 +132,7 @@ def fix_json_issues(json_str: str) -> Optional[str]:
         # Fix 8: Remove duplicate commas
         json_str = re.sub(r',\s*,', ',', json_str)
 
-        # Fix 9: Fix missing commas between fields (common mistake)
-        # Pattern: "value" followed by new field without comma
+        # Fix 9: Fix missing commas between fields
         json_str = re.sub(r'"\s*\n\s*"', '",\n"', json_str)
         json_str = re.sub(r'}\s*\n\s*"', '},\n"', json_str)
         json_str = re.sub(r']\s*\n\s*"', '],\n"', json_str)
@@ -142,16 +140,13 @@ def fix_json_issues(json_str: str) -> Optional[str]:
         # Try to parse the fixed JSON
         json.loads(json_str)
 
-        # If we got here, the JSON is now valid
         if json_str != original:
             logger.debug(f"Fixed JSON issues: {original[:100]}... -> {json_str[:100]}...")
-
         return json_str
 
     except (json.JSONDecodeError, re.error) as e:
-        # If still invalid, try more aggressive fixes
         logger.debug(f"Could not fix JSON with standard fixes: {e}")
-        
+
         # Last resort: try to extract just the first complete JSON object
         try:
             first_brace = json_str.find('{')
@@ -163,15 +158,64 @@ def fix_json_issues(json_str: str) -> Optional[str]:
                     elif char == '}':
                         brace_count -= 1
                         if brace_count == 0:
-                            # Found complete object
                             extracted = json_str[first_brace:i+1]
-                            json.loads(extracted)  # Validate
+                            json.loads(extracted)
                             logger.info(f"Extracted complete JSON object from position {first_brace} to {i+1}")
                             return extracted
         except (json.JSONDecodeError, ValueError):
             pass
-        
+
         return None
+
+
+def _extract_first_balanced_json_object(text: str) -> Optional[str]:
+    """Extract the first balanced JSON object substring from text.
+
+    This is more robust than naive brace counting because it tracks JSON string state
+    and escapes, so braces inside strings don't affect balance.
+
+    Returns the substring from the first '{' through the matching '}', or None.
+    """
+    if not isinstance(text, str) or not text:
+        return None
+
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+
+        if ch == "{":
+            depth += 1
+            continue
+
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+            continue
+
+    return None
 
 
 def _extract_and_parse_json(
@@ -201,6 +245,11 @@ def _extract_and_parse_json(
     # Clean and validate JSON string
     # 1. Remove leading/trailing whitespace and newlines (including \n, \r, \t, spaces)
     json_str = json_str.strip()
+
+    # NEW: Extract first balanced JSON object (robust for long/complex tool calls)
+    balanced = _extract_first_balanced_json_object(json_str)
+    if balanced:
+        json_str = balanced
 
     # Log the raw JSON for debugging
     logger.debug(f"Raw JSON string after strip: {repr(json_str)[:200]}")
@@ -332,9 +381,50 @@ def detect_all_tool_call_blocks(text: str) -> List[dict]:
 
         start = start_match.start()
         start_tag_length = start_match.end() - start_match.start()
+        content_start = start + start_tag_length
+
+        # Robust path: first extract a balanced JSON object from the remainder.
+        # This avoids being confused by literal </TOOL_CALL> text inside JSON strings.
+        remainder = text[content_start:]
+        balanced_json = _extract_first_balanced_json_object(remainder)
+        if balanced_json:
+            payload, _, _ = _extract_and_parse_json(
+                balanced_json,
+                start,
+                None,
+                start_tag_length,
+                text_length,
+            )
+            if payload is not None:
+                is_valid, name, input_data = _validate_tool_call_payload(payload)
+                if is_valid:
+                    if name == "Read" and "file_path" not in input_data and "path" in input_data:
+                        input_data = dict(input_data)
+                        input_data["file_path"] = input_data.pop("path")
+                        logger.debug("Applied compatibility fix for Read tool: path -> file_path")
+
+                    name = normalize_tool_name(name)
+                    input_data = normalize_tool_input(name, input_data)
+
+                    json_rel_start = remainder.find("{")
+                    json_end_pos = json_rel_start + len(balanced_json) if json_rel_start >= 0 else len(balanced_json)
+                    end_match_after_json = end_pattern.search(text, content_start + json_end_pos)
+                    span_end = end_match_after_json.end() if end_match_after_json else content_start + json_end_pos
+
+                    tool_calls.append({
+                        "type": "tool_use",
+                        "id": f"toolu_{uuid.uuid4().hex[:24]}",
+                        "name": name,
+                        "input": input_data,
+                        "_span": (start, span_end),
+                    })
+
+                    logger.info(f"Detected tool call: {name} with {len(input_data)} parameters")
+                    search_start = span_end
+                    continue
 
         # Find corresponding end tag
-        end_match = end_pattern.search(text, start + start_tag_length)
+        end_match = end_pattern.search(text, content_start)
 
         # Extract JSON content (with or without closing tag)
         if end_match:

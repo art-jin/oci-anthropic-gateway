@@ -60,7 +60,12 @@ async def catch_all(path: str, request: Request):
 if __name__ == "__main__":
     # Initialize configuration
     config_file = "config.json"
-    init_config(config_file)
+    config = init_config(config_file)
 
     # Run the server
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+    uvicorn.run(
+        app,
+        host=config.server_host,
+        port=config.server_port,
+        log_level=config.server_log_level,
+    )

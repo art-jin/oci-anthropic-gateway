@@ -26,8 +26,8 @@ pip install -r requirements.txt
 
 ### Run the Server
 ```bash
-python main.py                        # Runs on 0.0.0.0:8000
-LOG_LEVEL=DEBUG python main.py        # Verbose logging
+python main.py                        # Binds to server.host:server.port from config.json (default 127.0.0.1:8000)
+LOG_LEVEL=DEBUG python main.py        # Verbose gateway logging
 LOG_LEVEL=WARNING python main.py      # Minimal logging (production)
 ```
 
@@ -110,7 +110,13 @@ Copy `config.json.template` to `config.json`. Key fields:
       "temperature": 0.7
     }
   },
-  "default_model": "gpt5"
+  "default_model": "gpt5",
+  "debug": false,
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "log_level": "warning"
+  }
 }
 ```
 
@@ -120,6 +126,10 @@ Copy `config.json.template` to `config.json`. Key fields:
 | `api_format` | `"generic"` (simulated tools) or `"cohere"` (native tools) |
 | `max_tokens_key` | Parameter name: `"max_tokens"` or `"max_completion_tokens"` |
 | `temperature` | Fixed temperature (overrides request) |
+| `debug` | Debug-only mode. When `true`, writes diagnostic dumps to `./debug_dumps/`. |
+| `server.host` | Uvicorn bind host (e.g. `127.0.0.1`, `0.0.0.0`). |
+| `server.port` | Uvicorn bind port (1-65535). |
+| `server.log_level` | Uvicorn log level: `critical|error|warning|info|debug|trace`. |
 
 ## API Features
 
@@ -289,6 +299,22 @@ oci==2.131.1
 - Consider implementing authentication for production
 
 ## Changelog
+
+### 2026-03-04: Debug dumps for tool call instability + configurable server bind
+
+**Problem:** Tool call detection could become unstable under long/complex outputs (e.g. missing `<TOOL_CALL>` wrapper, missing closing marker, or streaming timing issues), making root-cause hard to reproduce.
+
+**Fix:**
+- Added `debug` flag in `config.json` to enable debug-only observability dumps written to `./debug_dumps/`.
+- Dumps include request/response summaries and tool detection evidence for both non-streaming and streaming flows.
+- Made Uvicorn bind configurable via `config.json`:
+  - `server.host`
+  - `server.port`
+  - `server.log_level`
+
+**Notes:**
+- When `debug` is disabled, dump writing is a no-op.
+- Dump write failures must not impact request flow.
 
 ### 2025-02-15: Fix Streaming Tool Call Detection
 

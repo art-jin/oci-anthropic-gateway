@@ -50,6 +50,11 @@
         "temperature": 0.7
       }
   },
-  "default_model": "xai.grok-4-fast-non-reasoning"
-  ,"debug": false
+  "default_model": "xai.grok-4-fast-non-reasoning",
+  "debug": false,
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "log_level": "warning"
+  }
 }

@@ -31,6 +31,9 @@ class Config:
         self.default_model_conf: Dict[str, Any] = {}
         self.genai_client: Optional[oci.generative_ai_inference.GenerativeAiInferenceClient] = None
         self.debug: bool = False
+        self.server_host: str = "127.0.0.1"
+        self.server_port: int = 8000
+        self.server_log_level: str = "warning"
 
         self._load_config()
         self._init_oci_client()
@@ -52,6 +55,36 @@ class Config:
             self.default_model_name = custom_config.get("default_model")
             self.debug = bool(custom_config.get("debug", False))
 
+            server_conf = custom_config.get("server", {})
+            host = server_conf.get("host", "127.0.0.1")
+            port = server_conf.get("port", 8000)
+            log_level = server_conf.get("log_level", "warning")
+
+            if not isinstance(host, str) or not host.strip():
+                raise ValueError("Invalid server.host in config.json")
+
+            try:
+                port_int = int(port)
+            except Exception as e:
+                raise ValueError("Invalid server.port in config.json") from e
+
+            if port_int < 1 or port_int > 65535:
+                raise ValueError("Invalid server.port in config.json (must be 1-65535)")
+
+            if not isinstance(log_level, str) or not log_level.strip():
+                raise ValueError("Invalid server.log_level in config.json")
+
+            normalized_log_level = log_level.strip().lower()
+            allowed_log_levels = {"critical", "error", "warning", "info", "debug", "trace"}
+            if normalized_log_level not in allowed_log_levels:
+                raise ValueError(
+                    "Invalid server.log_level in config.json (allowed: critical,error,warning,info,debug,trace)"
+                )
+
+            self.server_host = host.strip()
+            self.server_port = port_int
+            self.server_log_level = normalized_log_level
+
             self.default_model_conf = self.model_definitions.get(self.default_model_name)
 
             if not self.default_model_conf:
@@ -62,7 +95,10 @@ class Config:
             if "compartment_id" not in self.default_model_conf:
                 self.default_model_conf["compartment_id"] = self.compartment_id
 
-            logger.info(f"Config loaded. Default model: {self.default_model_name} (debug={self.debug})")
+            logger.info(
+                f"Config loaded. Default model: {self.default_model_name} (debug={self.debug}) "
+                f"server={self.server_host}:{self.server_port} log_level={self.server_log_level}"
+            )
 
         except Exception as e:
             logger.error(f"Configuration initialization failed: {e}")

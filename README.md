@@ -533,6 +533,78 @@ DEBUG:oci-gateway:Raw JSON string: {"name": "Bash",...
 
 For complete logging documentation, see [LOGGING.md](LOGGING.md).
 
+## Debug UI
+
+The gateway includes a real-time **Swimlane Debug UI** for visualizing message flows through the gateway.
+
+### Access
+
+```bash
+# Start the gateway
+python main.py
+
+# Open Debug UI in browser
+open http://localhost:8000/debug/
+```
+
+### Swimlane Diagram
+
+The Debug UI displays a live swimlane diagram showing message flow between three lanes:
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│     CLIENT      │     │     GATEWAY     │     │    OCI GenAI    │
+│   (Anthropic)   │     │                 │     │                 │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         │───── Request ────────►│                       │
+         │     (full body)       │                       │
+         │                       │                       │
+         │                       │───── OCI Request ────►│
+         │                       │                       │
+         │                       │◄──── Stream Text ─────│
+         │                       │                       │
+         │                       │ ▒▒ Tool Detection ▒▒  │  ← Internal processing
+         │                       │   (parse <TOOL_CALL>) │
+         │                       │                       │
+         │◄──── Response ────────│                       │
+         │   (Anthropic format)  │                       │
+         │                       │                       │
+```
+
+### Visual Elements
+
+| Symbol | Meaning |
+|--------|---------|
+| ⚫ Circle + Line | Message transfer between entities |
+| ▬▬ Rectangle | Internal processing (e.g., tool detection) |
+| Colors | Different sessions (in global view) |
+
+### Features
+
+- **Real-time updates**: SSE-based live event streaming
+- **Full message details**: Click any node to view complete JSON
+- **Multi-session view**: See all sessions in one diagram
+- **Auto-scroll**: Automatically scrolls to latest events
+- **Connection status**: Visual indicator for SSE connection
+
+### Pages
+
+| URL | Description |
+|-----|-------------|
+| `/debug/` | Global swimlane (all sessions) |
+| `/debug/sessions.html` | Session list |
+| `/debug/session.html?session_id=xxx` | Single session swimlane |
+
+### Event Types
+
+| Kind | Lane | Description |
+|------|------|-------------|
+| `request_summary` | Client → Gateway | Full request body from client |
+| `stream_accumulated_text` | OCI → Gateway | Accumulated streaming text |
+| `tool_detection_primary` | Gateway (internal) | Tool call parsing |
+| `final_response_summary` | Gateway → Client | Response sent to client |
+
 ## Troubleshooting
 
 ### Tool Calls Not Detected
@@ -723,5 +795,5 @@ For issues, questions, or contributions:
 
 ---
 
-**Last Updated**: 2026-01-30
-**Version**: 2.1 (Modular Architecture with Enhanced Tool Support)
+**Last Updated**: 2026-03-05
+**Version**: 2.2 (Real-time Swimlane Debug UI)

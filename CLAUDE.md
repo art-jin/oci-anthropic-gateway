@@ -311,6 +311,52 @@ oci==2.131.1
 
 ## Changelog
 
+### 2026-03-05: Real-time Swimlane Debug UI
+
+**New Feature:** Live visualization of message flow through the gateway.
+
+**Swimlane Diagram:**
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│     CLIENT      │     │     GATEWAY     │     │    OCI GenAI    │
+│   (Anthropic)   │     │                 │     │                 │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         │───── Request ────────►│                       │
+         │     (full body)       │                       │
+         │                       │                       │
+         │                       │───── OCI Request ────►│
+         │                       │                       │
+         │                       │◄──── Stream Text ─────│
+         │                       │                       │
+         │                       │ ▒▒ Tool Detection ▒▒  │  ← Internal processing
+         │                       │   (parse <TOOL_CALL>) │
+         │                       │                       │
+         │◄──── Response ────────│                       │
+         │   (Anthropic format)  │                       │
+```
+
+**Visual Elements:**
+- ⚫ Circle + Line = Message transfer between entities
+- ▬▬ Rectangle = Internal processing (tool detection, JSON parsing)
+- Colors = Different sessions in global view
+
+**Access:** `http://localhost:8000/debug/`
+
+**Key Files:**
+- `web/debug/index.html` - Global swimlane view (default)
+- `web/debug/swimlane.js` - SVG rendering + SSE real-time updates
+- `web/debug/swimlane.css` - Styles
+- `src/debug/routes.py` - `/timeline` and `/events` SSE endpoints
+- `src/debug/repository.py` - `get_all_timeline()` method
+
+**Features:**
+- Real-time SSE updates
+- Click nodes to view full JSON payload
+- Multi-session view with color coding
+- Auto-scroll to latest events
+- Connection status indicator
+
 ### 2026-03-04: Debug dumps for tool call instability + configurable server bind
 
 **Problem:** Tool call detection could become unstable under long/complex outputs (e.g. missing `<TOOL_CALL>` wrapper, missing closing marker, or streaming timing issues), making root-cause hard to reproduce.

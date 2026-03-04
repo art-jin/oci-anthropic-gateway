@@ -1,3 +1,4 @@
+.venv/
 # Configuration files with sensitive data
 config.json
 
@@ -19,3 +20,5 @@ build/
 
 # Logs
 *.log
+
+debug_dumps/

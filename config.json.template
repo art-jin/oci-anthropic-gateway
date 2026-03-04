@@ -51,4 +51,5 @@
       }
   },
   "default_model": "xai.grok-4-fast-non-reasoning"
+  ,"debug": false
 }

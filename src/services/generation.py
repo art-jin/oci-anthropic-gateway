@@ -19,8 +19,54 @@ from ..utils.content_converter import (
 )
 from ..utils.json_helper import detect_all_tool_call_blocks, detect_natural_language_tool_calls
 from ..utils.token import estimate_tokens
+from ..utils.debug_dump import DebugDumpConfig, write_debug_dump
 
 logger = logging.getLogger("oci-gateway")
+
+
+def _has_tool_call_markers(text: str) -> dict:
+    if not isinstance(text, str):
+        text = str(text)
+    return {
+        "has_tool_call_start": "<TOOL_CALL>" in text,
+        "has_tool_call_end": "</TOOL_CALL>" in text,
+    }
+
+
+def _summarize_request_messages(oci_messages) -> list:
+    summary = []
+    for m in oci_messages or []:
+        try:
+            role = getattr(m, "role", None)
+            content = getattr(m, "content", None)
+            if not isinstance(content, list):
+                content = []
+
+            types = []
+            text_chars = 0
+            for c in content:
+                # OCI SDK objects sometimes have .text, or may be dict-like.
+                c_type = getattr(c, "type", None) or getattr(c, "_type", None)
+                if not c_type and isinstance(c, dict):
+                    c_type = c.get("type")
+                if not c_type:
+                    c_type = c.__class__.__name__
+                types.append(str(c_type))
+
+                t = getattr(c, "text", None)
+                if t is None and isinstance(c, dict):
+                    t = c.get("text")
+                if isinstance(t, str):
+                    text_chars += len(t)
+
+            summary.append({
+                "role": role,
+                "content_types": types,
+                "text_chars": text_chars,
+            })
+        except Exception:
+            summary.append({"role": None, "content_types": [], "text_chars": 0})
+    return summary
 
 
 async def generate_oci_non_stream(
@@ -30,7 +76,9 @@ async def generate_oci_non_stream(
     model_conf,
     requested_model,
     genai_client,
-    cohere_messages=None
+    cohere_messages=None,
+    *,
+    debug_enabled: bool = False
 ):
     """
     Generate non-streaming response from OCI GenAI and format it as Anthropic-compatible JSON.
@@ -214,6 +262,28 @@ RULES:
     if genai_client is None:
         raise ValueError("genai_client cannot be None")
 
+    debug_conf = DebugDumpConfig(enabled=bool(debug_enabled))
+    if debug_conf.enabled:
+        try:
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "request_summary",
+                {
+                    "message_id": message_id,
+                    "requested_model": requested_model,
+                    "api_format": api_format,
+                    "is_cohere": is_cohere,
+                    "stream": False,
+                    "tools_count": len(params.get("tools") or []),
+                    "tool_choice": params.get("tool_choice"),
+                    "params_keys": sorted(list(params.keys())),
+                    "oci_messages_summary": _summarize_request_messages(oci_messages),
+                },
+            )
+        except Exception:
+            pass
+
     try:
         # Call OCI (non-streaming) - run in thread pool to avoid blocking event loop
         response = await asyncio.to_thread(genai_client.chat, chat_detail)
@@ -284,6 +354,24 @@ RULES:
                     logger.info(f"Checking for tool calls in text (length: {len(text_to_check)}): {text_to_check[:500]}")
                     tool_calls_in_text = detect_all_tool_call_blocks(text_to_check)
                     logger.info(f"Found {len(tool_calls_in_text)} tool calls using primary detection")
+
+                    if debug_conf.enabled:
+                        write_debug_dump(
+                            debug_conf,
+                            message_id,
+                            "raw_text",
+                            {
+                                "text_to_check_len": len(text_to_check),
+                                **_has_tool_call_markers(text_to_check),
+                                "raw_text": text_to_check,
+                            },
+                        )
+                        write_debug_dump(
+                            debug_conf,
+                            message_id,
+                            "tool_detection_primary",
+                            {"detected": tool_calls_in_text},
+                        )
                     
                     # If no tool calls found with primary method and we have tools, try natural language fallback
                     if not tool_calls_in_text and "tools" in params and params["tools"]:
@@ -292,6 +380,18 @@ RULES:
                         tool_calls_in_text = detect_natural_language_tool_calls(text_to_check, tool_names)
                         if tool_calls_in_text:
                             logger.info(f"Natural language fallback detected {len(tool_calls_in_text)} tool calls")
+
+                        if debug_conf.enabled:
+                            write_debug_dump(
+                                debug_conf,
+                                message_id,
+                                "tool_detection_fallback",
+                                {
+                                    "available_tools_count": len(tool_names),
+                                    "available_tools_sample": tool_names[:50],
+                                    "detected": tool_calls_in_text,
+                                },
+                            )
                     
                     if tool_calls_in_text:
                         clean_text = text_to_check
@@ -384,6 +484,20 @@ RULES:
         if "metadata" in params and params["metadata"]:
             anthropic_response["metadata"] = params["metadata"]
 
+        if debug_conf.enabled:
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "final_response_summary",
+                {
+                    "stop_reason": anthropic_response.get("stop_reason"),
+                    "stop_sequence": anthropic_response.get("stop_sequence"),
+                    "content_blocks_count": len(content_blocks or []),
+                    "content_types": [b.get("type") for b in (content_blocks or []) if isinstance(b, dict)],
+                    "response_content": json.dumps(content_blocks or [], ensure_ascii=False),
+                },
+            )
+
         return JSONResponse(content=anthropic_response)
 
     except Exception as e:
@@ -407,7 +521,9 @@ async def generate_oci_stream(
     model_conf,
     requested_model,
     genai_client,
-    cohere_messages=None
+    cohere_messages=None,
+    *,
+    debug_enabled: bool = False
 ):
     """
     Generate streaming response from OCI GenAI and format it as Anthropic-compatible SSE.
@@ -573,6 +689,28 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
     if genai_client is None:
         raise ValueError("genai_client cannot be None")
 
+    debug_conf = DebugDumpConfig(enabled=bool(debug_enabled))
+    if debug_conf.enabled:
+        try:
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "request_summary",
+                {
+                    "message_id": message_id,
+                    "requested_model": requested_model,
+                    "api_format": api_format,
+                    "is_cohere": is_cohere,
+                    "stream": True,
+                    "tools_count": len(params.get("tools") or []),
+                    "tool_choice": params.get("tool_choice"),
+                    "params_keys": sorted(list(params.keys())),
+                    "oci_messages_summary": _summarize_request_messages(oci_messages),
+                },
+            )
+        except Exception:
+            pass
+
     try:
         # Required starting events
         message_start_data = {
@@ -690,6 +828,24 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
             if buffer_text_for_tool_detection:
                 tool_calls_in_text = detect_all_tool_call_blocks(accumulated_text)
                 logger.info(f"Tool detection result: found {len(tool_calls_in_text)} tool calls")
+
+                if debug_conf.enabled:
+                    write_debug_dump(
+                        debug_conf,
+                        message_id,
+                        "stream_accumulated_text",
+                        {
+                            "accumulated_text_len": len(accumulated_text),
+                            **_has_tool_call_markers(accumulated_text),
+                            "accumulated_text": accumulated_text,
+                        },
+                    )
+                    write_debug_dump(
+                        debug_conf,
+                        message_id,
+                        "stream_tool_detection_primary",
+                        {"detected": tool_calls_in_text},
+                    )
                 if tool_calls_in_text:
                     # Remove all tool call blocks from the accumulated text
                     clean_text = accumulated_text

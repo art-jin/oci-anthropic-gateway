@@ -182,7 +182,16 @@ async def handle_messages_request(
     logger.debug(f"About to call generation with genai_client={app_config.genai_client is not None}")
     if body.get("stream", False):
         return StreamingResponse(
-            generate_oci_stream(oci_msgs, params_with_tools, message_id, model_conf, req_model, app_config.genai_client, cohere_messages),
+            generate_oci_stream(
+                oci_msgs,
+                params_with_tools,
+                message_id,
+                model_conf,
+                req_model,
+                app_config.genai_client,
+                cohere_messages,
+                debug_enabled=bool(app_config.debug),
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -192,7 +201,16 @@ async def handle_messages_request(
         )
     else:
         # Non-streaming logic
-        return await generate_oci_non_stream(oci_msgs, params_with_tools, message_id, model_conf, req_model, app_config.genai_client, cohere_messages)
+        return await generate_oci_non_stream(
+            oci_msgs,
+            params_with_tools,
+            message_id,
+            model_conf,
+            req_model,
+            app_config.genai_client,
+            cohere_messages,
+            debug_enabled=bool(app_config.debug),
+        )
 
 
 def _prepare_tools_params(body: dict, is_cohere: bool, oci_msgs: list) -> dict:

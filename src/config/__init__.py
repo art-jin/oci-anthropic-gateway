@@ -30,6 +30,7 @@ class Config:
         self.default_model_name: str = ""
         self.default_model_conf: Dict[str, Any] = {}
         self.genai_client: Optional[oci.generative_ai_inference.GenerativeAiInferenceClient] = None
+        self.debug: bool = False
 
         self._load_config()
         self._init_oci_client()
@@ -49,6 +50,7 @@ class Config:
             self.model_aliases = custom_config.get("model_aliases", {})
             self.model_definitions = custom_config.get("model_definitions", {})
             self.default_model_name = custom_config.get("default_model")
+            self.debug = bool(custom_config.get("debug", False))
 
             self.default_model_conf = self.model_definitions.get(self.default_model_name)
 
@@ -60,7 +62,7 @@ class Config:
             if "compartment_id" not in self.default_model_conf:
                 self.default_model_conf["compartment_id"] = self.compartment_id
 
-            logger.info(f"Config loaded. Default model: {self.default_model_name}")
+            logger.info(f"Config loaded. Default model: {self.default_model_name} (debug={self.debug})")
 
         except Exception as e:
             logger.error(f"Configuration initialization failed: {e}")

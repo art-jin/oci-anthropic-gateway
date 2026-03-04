@@ -260,6 +260,17 @@ LOG_LEVEL=DEBUG python main.py     # Verbose (debugging)
 3. Try explicit tool names in user message
 4. Test with `tool_choice: "required"`
 
+**Known failure mode (fixed):**
+- For long/complex tool calls (especially `Edit`), the literal string `</TOOL_CALL>` can appear inside JSON string fields such as `Edit.new_string`.
+- Older parsing could be misled by that literal and truncate the JSON early, resulting in `detected=[]`.
+- The gateway now extracts the *first balanced JSON object* after `<TOOL_CALL>` before searching for the real closing tag, making detection robust to `</TOOL_CALL>` appearing inside JSON strings.
+- Tool names are normalized (e.g. `edit` -> `Edit`) to reduce failures from model casing/style drift.
+
+**End-to-end verification:**
+1. Restart the gateway.
+2. Re-run the same Anthropic conversation that previously produced a long `Edit` tool call.
+3. Inspect `debug_dumps/*_stream_tool_detection_primary.json` and confirm `detected` is non-empty, and verify the client actually executes the `Edit` tool call.
+
 ### JSON Parsing Errors
 1. Review raw model output in logs
 2. Check for special characters
@@ -307,6 +318,8 @@ oci==2.131.1
 **Fix:**
 - Added `debug` flag in `config.json` to enable debug-only observability dumps written to `./debug_dumps/`.
 - Dumps include request/response summaries and tool detection evidence for both non-streaming and streaming flows.
+- Fixed a core parsing edge case where the literal string `</TOOL_CALL>` can appear inside JSON string fields (e.g. `Edit.new_string`) and mislead older extraction logic. The gateway now extracts the first balanced JSON object after `<TOOL_CALL>` before searching for the real closing tag (see `src/utils/json_helper.py`).
+- Added common tool-name normalization (e.g. `edit` -> `Edit`) to reduce failures from model casing/style drift (see `src/utils/json_helper.py`).
 - Made Uvicorn bind configurable via `config.json`:
   - `server.host`
   - `server.port`

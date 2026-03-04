@@ -95,7 +95,26 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The gateway runs on `0.0.0.0:8000` by default.
+By default the gateway binds to `127.0.0.1:8000`.
+
+You can configure bind host/port (and Uvicorn log level) via `config.json`:
+
+```json
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "log_level": "warning"
+  }
+}
+```
+
+You can also control gateway logging verbosity with `LOG_LEVEL`:
+
+```bash
+LOG_LEVEL=INFO python main.py
+LOG_LEVEL=DEBUG python main.py
+```
 
 ## Architecture
 
@@ -524,6 +543,16 @@ For complete logging documentation, see [LOGGING.md](LOGGING.md).
 3. Try explicit tool names in user message
 4. Simplify tool descriptions
 5. Test with `tool_choice: "required"`
+
+**Known failure mode (fixed):**
+- For long/complex tool calls (especially `Edit`), the literal string `</TOOL_CALL>` may appear inside `Edit.new_string`. Older parsing could be misled by that literal and truncate the JSON early, resulting in `detected=[]`.
+- The gateway now extracts the *first balanced JSON object* after `<TOOL_CALL>` before searching for the real closing tag, making detection robust to `</TOOL_CALL>` appearing inside JSON strings.
+- Common tool-name normalization was also added (e.g. `edit` -> `Edit`) to reduce failures from model casing/style drift.
+
+**End-to-end verification:**
+1. Restart the gateway.
+2. Re-run the same Anthropic conversation that previously produced a long `Edit` tool call.
+3. Inspect `debug_dumps/*_stream_tool_detection_primary.json` and confirm `detected` is non-empty, and verify the client actually executes the `Edit` tool call.
 
 ### JSON Parsing Errors
 

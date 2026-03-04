@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+from typing import Dict, List
+
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 
 from ..config import get_config
 from .repository import DebugRepository
 
+logger = logging.getLogger("oci-gateway")
 
 debug_router = APIRouter()
+
+# Global subscribers for SSE broadcasting: session_id -> list of queues
+_session_subscribers: Dict[str, List[asyncio.Queue]] = {}
+# Global subscriber for ALL sessions (key: None or "*")
+_global_subscribers: List[asyncio.Queue] = []
 
 
 def _ensure_enabled() -> DebugRepository:
@@ -64,6 +76,29 @@ def list_session_messages(
     return repo.list_session_messages(session_id=session_id, page=page, size=size)
 
 
+@debug_router.get("/sessions/{session_id}/timeline")
+def get_session_timeline(
+    session_id: str,
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    """Get timeline events for swimlane visualization."""
+    _enforce_auth(request)
+    repo = _ensure_enabled()
+    return repo.get_session_timeline(session_id=session_id, limit=limit)
+
+
+@debug_router.get("/timeline")
+def get_all_timeline(
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    """Get timeline events for ALL sessions (global swimlane view)."""
+    _enforce_auth(request)
+    repo = _ensure_enabled()
+    return repo.get_all_timeline(limit=limit)
+
+
 @debug_router.get("/messages/{message_id}")
 def get_message_detail(message_id: str, request: Request):
     _enforce_auth(request)
@@ -82,3 +117,133 @@ def get_dump_raw(dump_id: int, request: Request):
     if dump is None:
         raise HTTPException(status_code=404, detail="Dump not found")
     return dump
+
+
+@debug_router.get("/sessions/{session_id}/events")
+async def session_events(session_id: str, request: Request):
+    """SSE stream for real-time session timeline updates."""
+    _enforce_auth(request)
+    _ensure_enabled()
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    # Register subscriber
+    if session_id not in _session_subscribers:
+        _session_subscribers[session_id] = []
+    _session_subscribers[session_id].append(queue)
+    logger.debug("SSE subscriber added for session=%s, total=%d", session_id, len(_session_subscribers[session_id]))
+
+    async def event_generator():
+        try:
+            # Send initial connection event
+            yield f"event: connected\ndata: {json.dumps({'session_id': session_id})}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    # Wait for new event, timeout 30 seconds for heartbeat
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"event: timeline_event\ndata: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive comment
+                    yield ": heartbeat\n\n"
+
+        finally:
+            # Cleanup subscriber
+            if session_id in _session_subscribers:
+                try:
+                    _session_subscribers[session_id].remove(queue)
+                    logger.debug("SSE subscriber removed for session=%s, remaining=%d", session_id, len(_session_subscribers[session_id]))
+                    if not _session_subscribers[session_id]:
+                        del _session_subscribers[session_id]
+                except ValueError:
+                    pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@debug_router.get("/events")
+async def all_events(request: Request):
+    """SSE stream for real-time timeline updates from ALL sessions."""
+    _enforce_auth(request)
+    _ensure_enabled()
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    # Register global subscriber
+    _global_subscribers.append(queue)
+    logger.debug("Global SSE subscriber added, total=%d", len(_global_subscribers))
+
+    async def event_generator():
+        try:
+            # Send initial connection event
+            yield f"event: connected\ndata: {json.dumps({'scope': 'all'})}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    # Wait for new event, timeout 30 seconds for heartbeat
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"event: timeline_event\ndata: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive comment
+                    yield ": heartbeat\n\n"
+
+        finally:
+            # Cleanup subscriber
+            try:
+                _global_subscribers.remove(queue)
+                logger.debug("Global SSE subscriber removed, remaining=%d", len(_global_subscribers))
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+def broadcast_session_event(session_id: str, event: dict) -> None:
+    """Broadcast a timeline event to all SSE subscribers.
+
+    Called by DebugDumpIndexer when a new dump is ingested.
+    Pushes to both session-specific and global subscribers.
+    """
+    count = 0
+
+    # Push to session-specific subscribers
+    if session_id in _session_subscribers:
+        for queue in _session_subscribers[session_id]:
+            try:
+                queue.put_nowait(event)
+                count += 1
+            except asyncio.QueueFull:
+                logger.warning("SSE queue full for session=%s, dropping event", session_id)
+
+    # Push to global subscribers (all sessions)
+    for queue in _global_subscribers:
+        try:
+            queue.put_nowait(event)
+            count += 1
+        except asyncio.QueueFull:
+            logger.warning("Global SSE queue full, dropping event")
+
+    if count > 0:
+        logger.debug("Broadcast event to %d subscribers for session=%s", count, session_id)

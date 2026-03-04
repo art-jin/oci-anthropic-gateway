@@ -3,59 +3,106 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Session Timeline</title>
+  <title>Session Swimlane</title>
   <link rel="stylesheet" href="/debug/app.css" />
+  <link rel="stylesheet" href="/debug/swimlane.css" />
 </head>
 <body>
-  <div class="header"><h1 id="title">Session Timeline</h1></div>
-  <div class="layout">
-    <div class="card">
-      <div class="controls">
-        <a href="/debug/index.html">← Sessions</a>
-        <input id="page" type="number" min="1" value="1" style="width: 100px" />
-        <input id="size" type="number" min="1" max="500" value="50" style="width: 100px" />
-        <button id="loadBtn">Reload</button>
-      </div>
-      <div class="meta" id="meta"></div>
-      <div id="timeline"></div>
+  <div class="header">
+    <h1 id="title">Session Swimlane</h1>
+    <div class="header-controls">
+      <span id="connectionDot" class="status-dot disconnected">●</span>
+      <span id="connectionText">Connecting...</span>
+      <span id="eventCount">0 events</span>
+      <span id="statusBar"></span>
+      <a href="/debug/index.html">← Live Swimlane</a>
+      <a href="/debug/sessions.html">Session List</a>
+    </div>
+  </div>
+
+  <div class="swimlane-page">
+    <div class="swimlane-container" id="swimlaneContainer">
+      <!-- Swimlane SVG rendered here -->
+    </div>
+
+    <div class="resizer" id="resizer"></div>
+
+    <div class="detail-panel" id="detailPanel">
+      <div class="placeholder">Click an event node to view details</div>
     </div>
   </div>
 
   <script src="/debug/common.js"></script>
+  <script src="/debug/swimlane.js"></script>
   <script>
     const sessionId = qs('session_id') || '';
-    document.getElementById('title').textContent = `Session Timeline: ${sessionId}`;
 
-    async function loadTimeline() {
-      const page = Number(document.getElementById('page').value || 1);
-      const size = Number(document.getElementById('size').value || 50);
-      const data = await api(`/sessions/${encodeURIComponent(sessionId)}/messages?page=${page}&size=${size}`);
-      document.getElementById('meta').textContent = `total=${data.total}, page=${data.page}, size=${data.size}`;
+    // Truncate session ID for display
+    const displayId = sessionId.length > 30 ? sessionId.substring(0, 30) + '...' : sessionId;
+    document.getElementById('title').textContent = `Session: ${displayId}`;
 
-      const root = document.getElementById('timeline');
-      root.innerHTML = data.items.map(it => {
-        const stream = it.stream === 1 ? '<span class="badge">stream</span>' : '<span class="badge">non-stream</span>';
-        const tool = `<span class="${badgeClass(it.has_tool_call)}">tool_call=${it.has_tool_call ?? '-'}</span>`;
-        return `
-          <div class="timeline-item">
-            <div>
-              <a href="/debug/message.html?message_id=${encodeURIComponent(it.message_id)}">${esc(it.message_id)}</a>
-            </div>
-            <div class="meta">
-              ${stream} ${tool}
-              model=${esc(it.model || '-')} api=${esc(it.api_format || '-')} stop=${esc(it.stop_reason || '-')}
-              dumps=${esc(it.dump_count)} ts=${esc(it.ts)}
-            </div>
-          </div>
-        `;
-      }).join('');
-    }
+    // Initialize single-session swimlane timeline
+    const timeline = new SwimlaneTimeline(
+      sessionId,
+      'swimlaneContainer',
+      'detailPanel'
+    );
 
-    document.getElementById('loadBtn').addEventListener('click', () => {
-      loadTimeline().catch(err => alert(err.message));
+    timeline.init().catch(err => {
+      console.error('Failed to initialize timeline:', err);
+      document.getElementById('statusBar').textContent = `Error: ${err.message}`;
     });
 
-    loadTimeline().catch(err => alert(err.message));
+    // Update event count display
+    timeline.onEventCount = (count) => {
+      document.getElementById('eventCount').textContent = `${count} events`;
+    };
+
+    // Resizer drag functionality
+    const resizer = document.getElementById('resizer');
+    const detailPanel = document.getElementById('detailPanel');
+    let isResizing = false;
+
+    resizer.addEventListener('mousedown', (e) => {
+      isResizing = true;
+      resizer.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+
+      const containerRect = document.querySelector('.swimlane-page').getBoundingClientRect();
+      const newWidth = containerRect.right - e.clientX;
+
+      if (newWidth >= 280 && newWidth <= 600) {
+        detailPanel.style.width = newWidth + 'px';
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        resizer.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        timeline.handleResize();
+      }
+    });
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+      timeline.disconnect();
+    });
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        timeline.selectedEventId = null;
+        document.querySelectorAll('.event-node.selected').forEach(el => el.classList.remove('selected'));
+      }
+    });
   </script>
 </body>
 </html>

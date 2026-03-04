@@ -3,61 +3,99 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Debug Sessions</title>
+  <title>Gateway Debug - Swimlane</title>
   <link rel="stylesheet" href="/debug/app.css" />
+  <link rel="stylesheet" href="/debug/swimlane.css" />
 </head>
 <body>
-  <div class="header"><h1>Debug Sessions</h1></div>
-  <div class="layout">
-    <div class="card">
-      <div class="controls">
-        <input id="q" placeholder="Search session_id / tenant / user" style="min-width: 260px" />
-        <input id="page" type="number" min="1" value="1" style="width: 100px" />
-        <input id="size" type="number" min="1" max="200" value="20" style="width: 100px" />
-        <button id="loadBtn">Load</button>
-      </div>
-      <div class="meta" id="meta"></div>
-      <table class="table" id="table">
-        <thead>
-          <tr>
-            <th>Session</th>
-            <th>Tenant</th>
-            <th>User</th>
-            <th>Messages</th>
-            <th>Last Seen (UTC)</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
+  <div class="header">
+    <h1>Gateway Debug - Live Swimlane</h1>
+    <div class="header-controls">
+      <span id="connectionDot" class="status-dot disconnected">●</span>
+      <span id="connectionText">Connecting...</span>
+      <span id="eventCount">0 events</span>
+      <span id="statusBar"></span>
+      <a href="/debug/sessions.html">Session List</a>
+    </div>
+  </div>
+
+  <div class="swimlane-page">
+    <div class="swimlane-container" id="swimlaneContainer">
+      <!-- Swimlane SVG rendered here -->
+    </div>
+
+    <div class="resizer" id="resizer"></div>
+
+    <div class="detail-panel" id="detailPanel">
+      <div class="placeholder">Click an event node to view details</div>
     </div>
   </div>
 
   <script src="/debug/common.js"></script>
+  <script src="/debug/swimlane.js"></script>
   <script>
-    async function loadSessions() {
-      const q = document.getElementById('q').value.trim();
-      const page = Number(document.getElementById('page').value || 1);
-      const size = Number(document.getElementById('size').value || 20);
-      const data = await api(`/sessions?page=${page}&size=${size}&q=${encodeURIComponent(q)}`);
+    // Initialize global swimlane timeline (all sessions)
+    const timeline = new SwimlaneTimeline(
+      null,  // null = all sessions
+      'swimlaneContainer',
+      'detailPanel'
+    );
 
-      document.getElementById('meta').textContent = `total=${data.total}, page=${data.page}, size=${data.size}`;
-      const tbody = document.querySelector('#table tbody');
-      tbody.innerHTML = data.items.map(it => `
-        <tr>
-          <td><a href="/debug/session.html?session_id=${encodeURIComponent(it.session_id)}">${esc(it.session_id)}</a></td>
-          <td>${esc(it.tenant_id || '-')}</td>
-          <td>${esc(it.user_id || '-')}</td>
-          <td>${esc(it.message_count)}</td>
-          <td>${esc(it.last_seen)}</td>
-        </tr>
-      `).join('');
-    }
-
-    document.getElementById('loadBtn').addEventListener('click', () => {
-      loadSessions().catch(err => alert(err.message));
+    timeline.init().catch(err => {
+      console.error('Failed to initialize timeline:', err);
+      document.getElementById('statusBar').textContent = `Error: ${err.message}`;
     });
 
-    loadSessions().catch(err => alert(err.message));
+    // Update event count display
+    timeline.onEventCount = (count) => {
+      document.getElementById('eventCount').textContent = `${count} events`;
+    };
+
+    // Resizer drag functionality
+    const resizer = document.getElementById('resizer');
+    const detailPanel = document.getElementById('detailPanel');
+    let isResizing = false;
+
+    resizer.addEventListener('mousedown', (e) => {
+      isResizing = true;
+      resizer.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+
+      const containerRect = document.querySelector('.swimlane-page').getBoundingClientRect();
+      const newWidth = containerRect.right - e.clientX;
+
+      if (newWidth >= 280 && newWidth <= 600) {
+        detailPanel.style.width = newWidth + 'px';
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        resizer.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        timeline.handleResize();
+      }
+    });
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', () => {
+      timeline.disconnect();
+    });
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        timeline.selectedEventId = null;
+        document.querySelectorAll('.event-node.selected').forEach(el => el.classList.remove('selected'));
+      }
+    });
   </script>
 </body>
 </html>

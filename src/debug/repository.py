@@ -103,10 +103,19 @@ class DebugRepository:
 
     def ingest_dump_file(self, path: str) -> bool:
         """Ingest a single dump file. Returns True when inserted, False when skipped."""
+        result = self.ingest_dump_file_with_event(path)
+        return result is not None
+
+    def ingest_dump_file_with_event(self, path: str) -> Optional[Dict[str, Any]]:
+        """Ingest a single dump file and return event data for SSE broadcast.
+
+        Returns None if skipped or failed.
+        Returns dict with session_id and event if successful.
+        """
         with self._connect() as conn:
             row = conn.execute("SELECT 1 FROM dumps WHERE file_path = ?", (path,)).fetchone()
             if row:
-                return False
+                return None
 
             raw = Path(path).read_text(encoding="utf-8")
             parsed = json.loads(raw)
@@ -124,7 +133,7 @@ class DebugRepository:
 
             message_id = envelope.get("message_id") or self._message_id_from_filename(path)
             if not message_id:
-                return False
+                return None
 
             ts = envelope.get("timestamp") or self._safe_text_ts(path)
             kind = envelope.get("kind") or self._kind_from_filename(path) or "unknown"
@@ -136,13 +145,14 @@ class DebugRepository:
             payload_size = len(raw.encode("utf-8", errors="replace"))
             has_truncation = 1 if self._has_truncation(payload) else 0
 
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO dumps(message_id, session_id, kind, ts, file_path, payload_size, has_truncation)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (message_id, session_id, kind, ts, path, payload_size, has_truncation),
             )
+            dump_id = cursor.lastrowid
 
             model, stream, api_format, stop_reason, tools_count, has_tool_call = self._extract_message_summary(kind, payload)
 
@@ -194,7 +204,26 @@ class DebugRepository:
                         )
 
             conn.commit()
-            return True
+
+        # Build event for SSE broadcast
+        event = {
+            "id": dump_id,
+            "dump_id": dump_id,
+            "message_id": message_id,
+            "lane": self._map_kind_to_lane(kind),
+            "target_lane": self._map_kind_to_target_lane(kind),
+            "kind": kind,
+            "ts": ts,
+            "label": self._make_event_label(kind, payload),
+            "summary": self._make_event_summary(kind, payload),
+            "payload_size": payload_size,
+            "has_truncation": bool(has_truncation),
+        }
+
+        return {
+            "session_id": session_id,
+            "event": event,
+        }
 
     @staticmethod
     def _message_id_from_filename(path: str) -> Optional[str]:
@@ -333,3 +362,173 @@ class DebugRepository:
         if not row:
             return 0
         return int(row[0])
+
+    # ==================== Timeline API for Swimlane ====================
+
+    @staticmethod
+    def _map_kind_to_lane(kind: str) -> str:
+        """Map dump kind to swimlane (client/gateway/oci)."""
+        if kind == "request_summary":
+            return "client"
+        elif kind.startswith("oci_request") or kind.startswith("final_response"):
+            return "gateway"
+        elif kind.startswith("oci_response") or kind.startswith("stream_accumulated"):
+            return "oci"
+        elif kind.startswith("tool_detection") or kind == "raw_text":
+            return "gateway"
+        else:
+            return "gateway"
+
+    @staticmethod
+    def _map_kind_to_target_lane(kind: str) -> Optional[str]:
+        """Map dump kind to target lane for connector lines."""
+        if kind == "request_summary":
+            return "gateway"
+        elif kind.startswith("oci_request"):
+            return "oci"
+        elif kind.startswith("oci_response") or kind.startswith("stream_accumulated"):
+            return "gateway"
+        elif kind.startswith("final_response"):
+            return "client"
+        return None
+
+    @staticmethod
+    def _make_event_label(kind: str, payload: Any) -> str:
+        """Create short label for event node."""
+        labels = {
+            "request_summary": "Request",
+            "oci_request": "OCI Req",
+            "oci_response": "OCI Resp",
+            "stream_accumulated_text": "Stream",
+            "tool_detection_primary": "Tool Detect",
+            "stream_tool_detection_primary": "Tool Detect",
+            "final_response_summary": "Response",
+            "raw_text": "Raw Text",
+        }
+        if kind in labels:
+            return labels[kind]
+        # Fallback: use kind without underscores
+        return kind.replace("_", " ").title()[:15]
+
+    @staticmethod
+    def _make_event_summary(kind: str, payload: Any) -> str:
+        """Create one-line summary for tooltip/detail."""
+        if not isinstance(payload, dict):
+            return kind
+
+        if kind == "request_summary":
+            model = payload.get("requested_model", "?")
+            tools = payload.get("tools_count", 0)
+            stream = "stream" if payload.get("stream") else "non-stream"
+            return f"model={model}, tools={tools}, {stream}"
+        elif kind in ("tool_detection_primary", "stream_tool_detection_primary"):
+            detected = payload.get("detected") or []
+            count = len(detected) if isinstance(detected, list) else 0
+            return f"detected {count} tool calls"
+        elif kind == "stream_accumulated_text":
+            text = payload.get("accumulated_text", "")
+            length = len(text) if text else 0
+            has_tool = payload.get("has_tool_call_start", False)
+            return f"text_len={length}, has_tool_start={has_tool}"
+        elif kind == "final_response_summary":
+            stop = payload.get("stop_reason", "?")
+            return f"stop_reason={stop}"
+        return kind
+
+    def get_session_timeline(self, session_id: str, limit: int = 100) -> Dict[str, Any]:
+        """Get timeline events for swimlane visualization."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, message_id, session_id, kind, ts, file_path, payload_size, has_truncation
+                FROM dumps
+                WHERE session_id = ?
+                ORDER BY ts ASC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            ).fetchall()
+
+        events = []
+        for row in rows:
+            kind = row["kind"]
+            file_path = row["file_path"]
+
+            # Load payload for label/summary
+            try:
+                raw = Path(file_path).read_text(encoding="utf-8")
+                parsed = json.loads(raw)
+                payload = parsed.get("payload") if self._looks_like_envelope(parsed) else parsed
+            except Exception:
+                payload = {}
+
+            event = {
+                "id": row["id"],
+                "dump_id": row["id"],
+                "message_id": row["message_id"],
+                "session_id": row["session_id"],
+                "lane": self._map_kind_to_lane(kind),
+                "target_lane": self._map_kind_to_target_lane(kind),
+                "kind": kind,
+                "ts": row["ts"],
+                "label": self._make_event_label(kind, payload),
+                "summary": self._make_event_summary(kind, payload),
+                "payload_size": row["payload_size"],
+                "has_truncation": bool(row["has_truncation"]),
+            }
+            events.append(event)
+
+        return {
+            "session_id": session_id,
+            "lanes": ["client", "gateway", "oci"],
+            "events": events,
+            "total": len(events),
+        }
+
+    def get_all_timeline(self, limit: int = 500) -> Dict[str, Any]:
+        """Get timeline events for ALL sessions (for global swimlane view)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, message_id, session_id, kind, ts, file_path, payload_size, has_truncation
+                FROM dumps
+                ORDER BY ts ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        events = []
+        for row in rows:
+            kind = row["kind"]
+            file_path = row["file_path"]
+
+            # Load payload for label/summary
+            try:
+                raw = Path(file_path).read_text(encoding="utf-8")
+                parsed = json.loads(raw)
+                payload = parsed.get("payload") if self._looks_like_envelope(parsed) else parsed
+            except Exception:
+                payload = {}
+
+            event = {
+                "id": row["id"],
+                "dump_id": row["id"],
+                "message_id": row["message_id"],
+                "session_id": row["session_id"],
+                "lane": self._map_kind_to_lane(kind),
+                "target_lane": self._map_kind_to_target_lane(kind),
+                "kind": kind,
+                "ts": row["ts"],
+                "label": self._make_event_label(kind, payload),
+                "summary": self._make_event_summary(kind, payload),
+                "payload_size": row["payload_size"],
+                "has_truncation": bool(row["has_truncation"]),
+            }
+            events.append(event)
+
+        return {
+            "lanes": ["client", "gateway", "oci"],
+            "events": events,
+            "total": len(events),
+        }

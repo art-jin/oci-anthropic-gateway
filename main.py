@@ -33,6 +33,7 @@ app = FastAPI(title="OCI GenAI Anthropic Gateway")
 from src.config import init_config, get_config
 from src.routes import handle_count_tokens, handle_messages_request
 from src.debug import debug_router, DebugDumpIndexer
+from src.debug.routes import broadcast_session_event
 from src.utils.constants import DEFAULT_MAX_TOKENS
 
 app.include_router(debug_router, prefix="/debug/api")
@@ -54,6 +55,8 @@ async def _startup() -> None:
             db_path=cfg.debug_ui_index_db,
             scan_interval_sec=cfg.debug_ui_scan_interval_sec,
         )
+        # Register callback for real-time SSE broadcasting
+        indexer.set_event_callback(broadcast_session_event)
         app.state.debug_indexer = indexer
         app.state.debug_indexer_task = asyncio.create_task(indexer.run_forever())
     else:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any, Callable, Dict, Optional
 
 from .repository import DebugRepository
 
@@ -18,6 +19,15 @@ class DebugDumpIndexer:
         self.dump_dir = Path(dump_dir)
         self.repo = DebugRepository(db_path)
         self.scan_interval_sec = max(1, int(scan_interval_sec))
+        self._event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
+
+    def set_event_callback(self, callback: Callable[[str, Dict[str, Any]], None]) -> None:
+        """Set callback for new events.
+
+        Callback signature: callback(session_id: str, event: dict)
+        The event dict contains timeline event data for SSE broadcast.
+        """
+        self._event_callback = callback
 
     def scan_once(self) -> int:
         if not self.dump_dir.exists():
@@ -26,8 +36,14 @@ class DebugDumpIndexer:
         inserted = 0
         for path in sorted(self.dump_dir.glob("*.json")):
             try:
-                if self.repo.ingest_dump_file(str(path)):
+                event = self.repo.ingest_dump_file_with_event(str(path))
+                if event:
                     inserted += 1
+                    if self._event_callback:
+                        try:
+                            self._event_callback(event["session_id"], event["event"])
+                        except Exception as e:
+                            logger.warning("Event callback failed: %s", e)
             except Exception as e:
                 logger.warning("Debug index ingest failed: file=%s err=%s", path, e)
         return inserted

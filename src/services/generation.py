@@ -276,6 +276,11 @@ RULES:
     debug_conf = DebugDumpConfig(enabled=bool(debug_enabled))
     if debug_conf.enabled:
         try:
+            # Build full request for debug dump
+            full_request = dict(params)
+            # Remove potentially large fields that are already summarized
+            full_request.pop("oci_messages", None)
+
             write_debug_dump(
                 debug_conf,
                 message_id,
@@ -290,6 +295,8 @@ RULES:
                     "tool_choice": params.get("tool_choice"),
                     "params_keys": sorted(list(params.keys())),
                     "oci_messages_summary": _summarize_request_messages(oci_messages),
+                    # Full request body for debugging
+                    "full_request": full_request,
                 },
                 trace_ctx=trace_ctx,
             )
@@ -719,6 +726,11 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
     debug_conf = DebugDumpConfig(enabled=bool(debug_enabled))
     if debug_conf.enabled:
         try:
+            # Build full request for debug dump
+            full_request = dict(params)
+            # Remove potentially large fields that are already summarized
+            full_request.pop("oci_messages", None)
+
             write_debug_dump(
                 debug_conf,
                 message_id,
@@ -733,6 +745,8 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
                     "tool_choice": params.get("tool_choice"),
                     "params_keys": sorted(list(params.keys())),
                     "oci_messages_summary": _summarize_request_messages(oci_messages),
+                    # Full request body for debugging
+                    "full_request": full_request,
                 },
                 trace_ctx=trace_ctx,
             )

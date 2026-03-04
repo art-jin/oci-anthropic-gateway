@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Debug Sessions</title>
+  <link rel="stylesheet" href="/debug/app.css" />
+</head>
+<body>
+  <div class="header"><h1>Debug Sessions</h1></div>
+  <div class="layout">
+    <div class="card">
+      <div class="controls">
+        <a href="/debug/index.html">← Live Swimlane</a>
+        <input id="q" placeholder="Search session_id / tenant / user" style="min-width: 260px" />
+        <input id="page" type="number" min="1" value="1" style="width: 100px" />
+        <input id="size" type="number" min="1" max="200" value="20" style="width: 100px" />
+        <button id="loadBtn">Load</button>
+      </div>
+      <div class="meta" id="meta"></div>
+      <table class="table" id="table">
+        <thead>
+          <tr>
+            <th>Session</th>
+            <th>Tenant</th>
+            <th>User</th>
+            <th>Messages</th>
+            <th>Last Seen (UTC)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="/debug/common.js"></script>
+  <script>
+    async function loadSessions() {
+      const q = document.getElementById('q').value.trim();
+      const page = Number(document.getElementById('page').value || 1);
+      const size = Number(document.getElementById('size').value || 20);
+      const data = await api(`/sessions?page=${page}&size=${size}&q=${encodeURIComponent(q)}`);
+
+      document.getElementById('meta').textContent = `total=${data.total}, page=${data.page}, size=${data.size}`;
+      const tbody = document.querySelector('#table tbody');
+      tbody.innerHTML = data.items.map(it => `
+        <tr>
+          <td><a href="/debug/session.html?session_id=${encodeURIComponent(it.session_id)}">${esc(it.session_id)}</a></td>
+          <td>${esc(it.tenant_id || '-')}</td>
+          <td>${esc(it.user_id || '-')}</td>
+          <td>${esc(it.message_count)}</td>
+          <td>${esc(it.last_seen)}</td>
+        </tr>
+      `).join('');
+    }
+
+    document.getElementById('loadBtn').addEventListener('click', () => {
+      loadSessions().catch(err => alert(err.message));
+    });
+
+    loadSessions().catch(err => alert(err.message));
+  </script>
+</body>
+</html>

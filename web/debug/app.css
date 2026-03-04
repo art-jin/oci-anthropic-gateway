@@ -132,3 +132,49 @@ a:hover { text-decoration: underline; }
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* Additional shared styles for swimlane */
+.header {
+  display: flex;
+  align-items: center;
+}
+
+.header h1 {
+  flex: 1;
+}
+
+.copy-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  background: var(--accent-soft);
+  border: 1px solid #9fd5ce;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.copy-btn:hover {
+  background: #c6e9e3;
+}
+
+/* Scrollbar styling */
+.swimlane-container::-webkit-scrollbar,
+.detail-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.swimlane-container::-webkit-scrollbar-track,
+.detail-panel::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+.swimlane-container::-webkit-scrollbar-thumb,
+.detail-panel::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
+}
+
+.swimlane-container::-webkit-scrollbar-thumb:hover,
+.detail-panel::-webkit-scrollbar-thumb:hover {
+  background: #b8b1a3;
+}

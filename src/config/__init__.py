@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import oci
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -36,6 +37,7 @@ class Config:
         self.debug_ui_index_db: str = "debug_dumps/index.db"
         self.debug_ui_scan_interval_sec: int = 3
         self.debug_ui_auth_mode: str = "none"
+        self.debug_ui_auth_token: str = ""
         self.debug_ui_max_detail_bytes: int = 2_000_000
         self.server_host: str = "127.0.0.1"
         self.server_port: int = 8000
@@ -66,6 +68,7 @@ class Config:
             self.debug_ui_index_db = str(debug_ui.get("index_db", "debug_dumps/index.db"))
             self.debug_ui_scan_interval_sec = int(debug_ui.get("scan_interval_sec", 3))
             self.debug_ui_auth_mode = str(debug_ui.get("auth_mode", "none")).strip().lower()
+            self.debug_ui_auth_token = str(os.getenv("DEBUG_UI_AUTH_TOKEN", "")).strip()
             self.debug_ui_max_detail_bytes = int(debug_ui.get("max_detail_bytes", 2_000_000))
 
             server_conf = custom_config.get("server", {})

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 from typing import Dict, List
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -35,9 +36,24 @@ def _enforce_auth(request: Request) -> None:
     mode = conf.debug_ui_auth_mode
     if mode == "none":
         return
-    auth = request.headers.get("authorization")
-    if not auth:
-        raise HTTPException(status_code=401, detail="Missing authorization")
+    if mode != "bearer":
+        raise HTTPException(status_code=500, detail=f"Unsupported debug_ui auth_mode: {mode}")
+
+    expected = str(getattr(conf, "debug_ui_auth_token", "") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=500, detail="Debug UI auth token is not configured")
+
+    provided = ""
+    auth = (request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        provided = auth[7:].strip()
+    if not provided:
+        provided = str(request.query_params.get("access_token", "")).strip()
+
+    if not provided:
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    if not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="Invalid bearer token")
 
 
 @debug_router.get("/health")

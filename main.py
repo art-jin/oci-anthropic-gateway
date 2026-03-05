@@ -18,9 +18,12 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import oci
 import uvicorn
+from dotenv import load_dotenv
 
 # Add src directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Load local environment variables from .env if present
+load_dotenv()
 
 # Initialize logging with custom configuration
 from src.utils.logging_config import get_logger, set_log_level

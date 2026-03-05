@@ -537,6 +537,32 @@ For complete logging documentation, see [LOGGING.md](LOGGING.md).
 
 The gateway includes a real-time **Swimlane Debug UI** for visualizing message flows through the gateway.
 
+### Authentication (Bearer Token)
+
+Debug API now supports bearer-token authentication for production use.
+
+1. Copy token template and set your token:
+   ```bash
+   cp .env.template .env
+   # edit .env
+   # DEBUG_UI_AUTH_TOKEN=your-long-random-token
+   ```
+2. Enable bearer mode in `config.json`:
+   ```json
+   {
+     "debug_ui": {
+       "enabled": true,
+       "auth_mode": "bearer"
+     }
+   }
+   ```
+3. Restart gateway and open Debug UI.
+
+Access behavior:
+- If no token is stored, the page shows a token input dialog.
+- You can also pass `?auth_token=...` once; it is persisted to local storage.
+- A small auth toolbar is shown on debug pages (`Set Token` / `Clear`).
+
 ### Access
 
 ```bash
@@ -576,7 +602,7 @@ The Debug UI displays a live swimlane diagram showing message flow between three
 
 | Symbol | Meaning |
 |--------|---------|
-| ⚫ Circle + Line | Message transfer between entities |
+| Hollow source circle + solid target circle + arrow line | Directed message transfer between entities |
 | ▬▬ Rectangle | Internal processing (e.g., tool detection) |
 | Colors | Different sessions (in global view) |
 
@@ -601,8 +627,12 @@ The Debug UI displays a live swimlane diagram showing message flow between three
 | Kind | Lane | Description |
 |------|------|-------------|
 | `request_summary` | Client → Gateway | Full request body from client |
+| `oci_request` | Gateway → OCI | Gateway request sent to OCI GenAI |
+| `oci_response` | OCI → Gateway | OCI GenAI response received by gateway |
+| `oci_response_error` | Gateway | OCI call failed before response |
 | `stream_accumulated_text` | OCI → Gateway | Accumulated streaming text |
 | `tool_detection_primary` | Gateway (internal) | Tool call parsing |
+| `stream_tool_detection_primary` | Gateway (internal) | Tool call parsing for streaming path |
 | `final_response_summary` | Gateway → Client | Response sent to client |
 
 ## Troubleshooting
@@ -740,8 +770,9 @@ if __name__ == "__main__":
 ## Security Notes
 
 - `config.json` is in `.gitignore` - never commit it
+- `.env` is in `.gitignore` - never commit debug auth token
 - Use OCI IAM policies to restrict model access
-- Consider implementing authentication for production
+- Use `debug_ui.auth_mode: "bearer"` with `DEBUG_UI_AUTH_TOKEN` in `.env`
 - Monitor token usage and costs
 
 ## Future Enhancements
@@ -796,4 +827,4 @@ For issues, questions, or contributions:
 ---
 
 **Last Updated**: 2026-03-05
-**Version**: 2.2 (Real-time Swimlane Debug UI)
+**Version**: 2.3 (Debug UI Auth + Swimlane Improvements)

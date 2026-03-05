@@ -69,6 +69,28 @@ def _summarize_request_messages(oci_messages) -> list:
     return summary
 
 
+def _summarize_oci_response(response_obj) -> dict:
+    """Build a lightweight, serialization-safe summary for OCI SDK response."""
+    try:
+        data = getattr(response_obj, "data", None)
+        chat_response = getattr(data, "chat_response", None) if data is not None else None
+        return {
+            "response_type": type(response_obj).__name__,
+            "data_type": type(data).__name__ if data is not None else None,
+            "has_chat_response": chat_response is not None,
+            "chat_response_type": type(chat_response).__name__ if chat_response is not None else None,
+            "has_events": bool(data is not None and hasattr(data, "events")),
+        }
+    except Exception:
+        return {
+            "response_type": type(response_obj).__name__ if response_obj is not None else None,
+            "data_type": None,
+            "has_chat_response": False,
+            "chat_response_type": None,
+            "has_events": False,
+        }
+
+
 async def generate_oci_non_stream(
     oci_messages,
     params,
@@ -303,9 +325,37 @@ RULES:
         except Exception:
             pass
 
+    oci_call_started = False
+    oci_call_completed = False
     try:
+        if debug_conf.enabled:
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "oci_request",
+                {
+                    "stream": False,
+                    "api_format": api_format,
+                    "compartment_id_set": bool(chat_detail.compartment_id),
+                    "model_id": model_conf.get("ocid", ""),
+                    "chat_request_type": type(chat_request).__name__,
+                },
+                trace_ctx=trace_ctx,
+            )
+
         # Call OCI (non-streaming) - run in thread pool to avoid blocking event loop
+        oci_call_started = True
         response = await asyncio.to_thread(genai_client.chat, chat_detail)
+        oci_call_completed = True
+
+        if debug_conf.enabled:
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "oci_response",
+                _summarize_oci_response(response),
+                trace_ctx=trace_ctx,
+            )
 
         # Parse the response
         accumulated_text = ""
@@ -525,6 +575,33 @@ RULES:
 
     except Exception as e:
         logger.exception("Non-streaming output exception")
+        if debug_conf.enabled:
+            if oci_call_started and not oci_call_completed:
+                write_debug_dump(
+                    debug_conf,
+                    message_id,
+                    "oci_response_error",
+                    {
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    },
+                    trace_ctx=trace_ctx,
+                )
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "final_response_summary",
+                {
+                    "stop_reason": "error",
+                    "stop_sequence": None,
+                    "content_blocks_count": 0,
+                    "content_types": [],
+                    "response_content": "",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                },
+                trace_ctx=trace_ctx,
+            )
         return JSONResponse(
             status_code=500,
             content={
@@ -753,6 +830,8 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
         except Exception:
             pass
 
+    oci_call_started = False
+    oci_call_completed = False
     try:
         # Required starting events
         message_start_data = {
@@ -780,8 +859,34 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
             'content_block': {'type': 'text', 'text': ''}
         })}\n\n"
 
+        if debug_conf.enabled:
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "oci_request",
+                {
+                    "stream": True,
+                    "api_format": api_format,
+                    "compartment_id_set": bool(chat_detail.compartment_id),
+                    "model_id": model_conf.get("ocid", ""),
+                    "chat_request_type": type(chat_request).__name__,
+                },
+                trace_ctx=trace_ctx,
+            )
+
         # Call OCI - run in thread pool to avoid blocking event loop
+        oci_call_started = True
         response = await asyncio.to_thread(genai_client.chat, chat_detail)
+        oci_call_completed = True
+
+        if debug_conf.enabled:
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "oci_response",
+                _summarize_oci_response(response),
+                trace_ctx=trace_ctx,
+            )
 
         accumulated_text = ""
         accumulated_tool_json = ""
@@ -982,6 +1087,26 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
             }
         })}\n\n"
 
+        if debug_conf.enabled:
+            content_types = []
+            if accumulated_text:
+                content_types.append("text")
+            if tool_call_detected:
+                content_types.append("tool_use")
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "final_response_summary",
+                {
+                    "stop_reason": stop_reason,
+                    "stop_sequence": stop_sequence,
+                    "content_blocks_count": len(content_types),
+                    "content_types": content_types,
+                    "response_content": accumulated_text,
+                },
+                trace_ctx=trace_ctx,
+            )
+
         yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -990,6 +1115,34 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
         error_str = str(e).lower()
         is_retryable = "timeout" in error_str or "connection" in error_str
         error_type = "timeout_error" if "timeout" in error_str else "internal_error"
+        if debug_conf.enabled:
+            if oci_call_started and not oci_call_completed:
+                write_debug_dump(
+                    debug_conf,
+                    message_id,
+                    "oci_response_error",
+                    {
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                    },
+                    trace_ctx=trace_ctx,
+                )
+            write_debug_dump(
+                debug_conf,
+                message_id,
+                "final_response_summary",
+                {
+                    "stop_reason": "error",
+                    "stop_sequence": None,
+                    "content_blocks_count": 0,
+                    "content_types": [],
+                    "response_content": "",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "retryable": is_retryable,
+                },
+                trace_ctx=trace_ctx,
+            )
         yield f"event: error\ndata: {json.dumps({
             'type': 'error',
             'error': {

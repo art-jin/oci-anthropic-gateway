@@ -22,3 +22,4 @@ build/
 *.log
 
 debug_dumps/
+.env

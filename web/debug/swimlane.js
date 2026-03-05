@@ -18,6 +18,7 @@ class SwimlaneTimeline {
     this.events = [];
     this.eventSource = null;
     this.svg = null;
+    this.defs = null;
     this.autoScroll = true;
     this.selectedEventId = null;
     this.onEventCount = null;  // Callback for event count updates
@@ -25,7 +26,7 @@ class SwimlaneTimeline {
     // Layout constants
     this.laneWidth = 0;
     this.nodeRadius = 8;
-    this.nodeSpacingY = 60;
+    this.nodeSpacingY = 30;
     this.headerHeight = 50;
     this.paddingX = 40;
 
@@ -42,6 +43,7 @@ class SwimlaneTimeline {
       '#06b6d4', '#ec4899', '#84cc16', '#f97316', '#6366f1'
     ];
     this.sessionColorMap = {};
+    this.markerColorMap = {};
   }
 
   /**
@@ -123,39 +125,51 @@ class SwimlaneTimeline {
     this.container.appendChild(this.svg);
 
     // SVG defs (markers, gradients)
-    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    this.defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    this.svg.appendChild(this.defs);
+  }
 
-    // Arrow markers for each direction
-    const directions = [
-      { id: 'arrow-right', orient: 'auto' },
-      { id: 'arrow-left', orient: 'auto-start-reverse' }
-    ];
+  /**
+   * Create/get a solid arrow marker using the given color.
+   */
+  getArrowMarkerId(color) {
+    if (this.markerColorMap[color]) return this.markerColorMap[color];
 
-    directions.forEach(dir => {
-      const arrowMarker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-      arrowMarker.setAttribute('id', dir.id);
-      arrowMarker.setAttribute('markerWidth', '8');
-      arrowMarker.setAttribute('markerHeight', '6');
-      arrowMarker.setAttribute('refX', '7');
-      arrowMarker.setAttribute('refY', '3');
-      arrowMarker.setAttribute('orient', dir.orient);
-      const arrowPath = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-      arrowPath.setAttribute('points', '0 0, 8 3, 0 6');
-      arrowPath.classList.add('arrow-marker');
-      arrowMarker.appendChild(arrowPath);
-      defs.appendChild(arrowMarker);
-    });
+    const markerId = `arrow-${color.replace('#', '')}`;
+    const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+    marker.setAttribute('id', markerId);
+    marker.setAttribute('viewBox', '0 0 14 10');
+    marker.setAttribute('markerWidth', '14');
+    marker.setAttribute('markerHeight', '10');
+    marker.setAttribute('refX', '12');
+    marker.setAttribute('refY', '5');
+    marker.setAttribute('orient', 'auto');
+    marker.setAttribute('markerUnits', 'userSpaceOnUse');
 
-    this.svg.appendChild(defs);
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'M 0 0 L 14 5 L 0 10 z');
+    path.classList.add('arrow-marker');
+    path.style.fill = color;
+    path.style.stroke = color;
+    marker.appendChild(path);
+    this.defs.appendChild(marker);
+
+    this.markerColorMap[color] = markerId;
+    return markerId;
   }
 
   /**
    * Connect to SSE endpoint for real-time updates
    */
   connectSSE() {
-    const url = this.sessionId
+    let url = this.sessionId
       ? `/debug/api/sessions/${encodeURIComponent(this.sessionId)}/events`
       : '/debug/api/events';
+    const token = typeof window.getDebugAuthToken === 'function' ? window.getDebugAuthToken() : '';
+    if (token) {
+      const sep = url.includes('?') ? '&' : '?';
+      url = `${url}${sep}access_token=${encodeURIComponent(token)}`;
+    }
 
     try {
       this.eventSource = new EventSource(url);
@@ -310,7 +324,8 @@ class SwimlaneTimeline {
    */
   renderEvent(event, y, container, index) {
     const laneX = this.getLaneX(event.lane);
-    const sessionColor = this.getSessionColor(event.session_id);
+    const effectiveSessionId = event.session_id || this.sessionId;
+    const sessionColor = this.getSessionColor(effectiveSessionId);
     const isInternal = this.isInternalEvent(event.kind);
 
     // Create group for this event
@@ -325,18 +340,20 @@ class SwimlaneTimeline {
     // Draw HORIZONTAL connector line from source lane to target lane (only for non-internal events)
     if (event.target_lane && !isInternal) {
       const targetX = this.getLaneX(event.target_lane);
+      const isRightward = targetX > laneX;
+      const dir = isRightward ? 1 : -1;
+      const sourceR = this.nodeRadius * 0.78;
+      const targetR = sourceR * 1.18;
 
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
       line.classList.add('connector');
 
-      // Determine direction for arrow
-      const isRightward = targetX > laneX;
-      line.setAttribute('x1', laneX);
+      line.setAttribute('x1', laneX + dir * sourceR);
       line.setAttribute('y1', y);
-      line.setAttribute('x2', targetX);
+      line.setAttribute('x2', targetX - dir * targetR);
       line.setAttribute('y2', y);  // Horizontal line (same y)
-      line.setAttribute('marker-end', isRightward ? 'url(#arrow-right)' : 'url(#arrow-left)');
       line.style.stroke = sessionColor;
+      line.setAttribute('marker-end', `url(#${this.getArrowMarkerId(sessionColor)})`);
       g.appendChild(line);
     }
 
@@ -357,24 +374,29 @@ class SwimlaneTimeline {
       g.appendChild(rect);
     } else {
       // Message transfer: circle
+      const sourceR = this.nodeRadius * 0.78;
       const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       circle.classList.add('node', this.sanitizeClass(event.kind));
       circle.setAttribute('cx', laneX);
       circle.setAttribute('cy', y);
-      circle.setAttribute('r', this.nodeRadius);
-      circle.style.fill = sessionColor;
+      circle.setAttribute('r', sourceR);
+      circle.style.fill = '#ffffff';
+      circle.style.stroke = sessionColor;
+      circle.style.strokeWidth = '2.4';
       g.appendChild(circle);
 
       // Small circle at target position if has target_lane
       if (event.target_lane) {
         const targetX = this.getLaneX(event.target_lane);
+        const targetR = sourceR * 1.18;
         const targetCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
         targetCircle.classList.add('node', 'target', this.sanitizeClass(event.kind));
         targetCircle.setAttribute('cx', targetX);
         targetCircle.setAttribute('cy', y);
-        targetCircle.setAttribute('r', this.nodeRadius * 0.6);
+        targetCircle.setAttribute('r', targetR);
         targetCircle.style.fill = sessionColor;
-        targetCircle.style.opacity = '0.7';
+        targetCircle.style.stroke = sessionColor;
+        targetCircle.style.strokeWidth = '1.2';
         g.appendChild(targetCircle);
       }
     }

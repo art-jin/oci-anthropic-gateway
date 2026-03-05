@@ -210,6 +210,7 @@ class DebugRepository:
             "id": dump_id,
             "dump_id": dump_id,
             "message_id": message_id,
+            "session_id": session_id,
             "lane": self._map_kind_to_lane(kind),
             "target_lane": self._map_kind_to_target_lane(kind),
             "kind": kind,
@@ -399,6 +400,7 @@ class DebugRepository:
             "request_summary": "Request",
             "oci_request": "OCI Req",
             "oci_response": "OCI Resp",
+            "oci_response_error": "OCI Error",
             "stream_accumulated_text": "Stream",
             "tool_detection_primary": "Tool Detect",
             "stream_tool_detection_primary": "Tool Detect",
@@ -433,6 +435,9 @@ class DebugRepository:
         elif kind == "final_response_summary":
             stop = payload.get("stop_reason", "?")
             return f"stop_reason={stop}"
+        elif kind == "oci_response_error":
+            et = payload.get("error_type", "error")
+            return f"oci_error={et}"
         return kind
 
     def get_session_timeline(self, session_id: str, limit: int = 100) -> Dict[str, Any]:

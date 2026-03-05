@@ -152,19 +152,20 @@
   stroke: var(--ink-soft);
   stroke-width: 2;
   fill: none;
-  marker-end: url(#arrowhead);
-  opacity: 0.7;
-  transition: opacity 0.2s;
+  opacity: 0.95;
+  stroke-linecap: round;
+  transition: opacity 0.2s, stroke-width 0.2s;
 }
 
 .connector:hover {
   opacity: 1;
-  stroke-width: 3;
+  stroke-width: 2.8;
 }
 
 /* Arrow Marker */
 .arrow-marker {
-  fill: var(--ink-soft);
+  fill: context-stroke;
+  stroke: context-stroke;
 }
 
 /* Animations */

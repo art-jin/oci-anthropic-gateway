@@ -116,6 +116,190 @@ LOG_LEVEL=INFO python main.py
 LOG_LEVEL=DEBUG python main.py
 ```
 
+## Docker Deployment
+
+### Build the Image
+
+```bash
+docker build -t oci-anthropic-gateway:latest .
+```
+
+### Prepare Configuration
+
+```bash
+# 1. Create gateway config
+cp config.json.template config.json
+# Edit config.json with your OCI settings
+
+# 2. Create Docker-specific OCI credentials
+mkdir -p docker-oci
+
+# Create OCI config with container-compatible paths
+cat > docker-oci/config << 'EOF'
+[DEFAULT]
+user=ocid1.user.oc1..your-user-id
+fingerprint=your-fingerprint
+key_file=/root/.oci/oci_api_key.pem
+tenancy=ocid1.tenancy.oc1..your-tenancy-id
+region=us-chicago-1
+EOF
+
+# Copy your API key
+cp ~/.oci/oci_api_key.pem docker-oci/
+```
+
+### Run with Docker
+
+```bash
+docker run -d \
+  --name gateway \
+  -p 8000:8000 \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/docker-oci:/root/.oci:ro \
+  oci-anthropic-gateway:latest
+```
+
+### Run with Docker Compose
+
+```bash
+docker-compose up -d
+```
+
+### Verify
+
+```bash
+curl http://localhost:8000/debug/
+```
+
+## Kubernetes Deployment
+
+The gateway supports two authentication methods for Kubernetes:
+
+### OKE Authentication Comparison
+
+| Method | API Key Required | Configuration | Security |
+|--------|------------------|---------------|----------|
+| **Workload Identity** | ❌ No | OCI IAM Policy | ⭐⭐⭐ Highest |
+| Kubernetes Secrets | ✅ Yes | K8s Secret | ⭐⭐ Medium |
+
+### Option 1: Workload Identity (Recommended for OKE)
+
+No API keys needed! Uses OCI IAM policies for authentication.
+
+**Prerequisites:**
+1. OKE cluster with Workload Identity enabled
+2. Create a Dynamic Group in OCI IAM:
+   ```
+   Matching Rule:
+   ALL {resource.type = 'cluster', resource.id = '<your-cluster-ocid>'}
+   ```
+3. Create IAM Policy:
+   ```
+   Allow dynamic-group <your-dynamic-group> to use generative-ai-inference in compartment <compartment>
+   ```
+
+**Deploy:**
+```bash
+# Update k8s/deployment-workload-identity.yaml with your settings
+kubectl apply -f k8s/deployment-workload-identity.yaml
+```
+
+**Workload Identity Flow:**
+```
+┌─────────────────┐
+│   OKE Cluster   │
+│                 │
+│  ┌───────────┐  │
+│  │   Pod     │  │     1. Pod requests GenAI
+│  │ (gateway) │──┼────────────────────────┐
+│  └───────────┘  │                        │
+│                 │                        ▼
+└─────────────────┘              ┌─────────────────┐
+         │                       │   OCI IAM       │
+         │                       │                 │
+         │  2. Workload Identity │  Policy check   │
+         │     auto-auth         │  ✅ Allow       │
+         │                       │                 │
+         │                       └────────┬────────┘
+         │                                │
+         │                                ▼
+         │                       ┌─────────────────┐
+         └──────────────────────►│  OCI GenAI      │
+               3. Call API        │  Inference      │
+                                  └─────────────────┘
+```
+
+**Key Point:** Pod requires no API key. OCI automatically identifies the Pod's cluster and validates against IAM Policy.
+
+**Fine-grained Authorization (Recommended):**
+
+To restrict access to only the gateway Pod (not all Pods in the cluster):
+
+| Scope | Dynamic Group Rule | Security Level |
+|-------|-------------------|----------------|
+| Cluster-wide | `ALL {resource.type = 'cluster', resource.id = '<cluster-ocid>'}` | ⭐ Basic |
+| Namespace | `ALL {resource.type = 'cluster', resource.id = '<cluster-ocid>', request.principal.namespace = 'gateway-ns'}` | ⭐⭐ Better |
+| ServiceAccount | `ALL {resource.type = 'cluster', resource.id = '<cluster-ocid>', request.principal.namespace = 'gateway-ns', request.principal.service_account = 'gateway-sa'}` | ⭐⭐⭐ Best |
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        OKE Cluster                               │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────┐  │
+│  │   Namespace:    │    │   Namespace:    │    │ Namespace:  │  │
+│  │   gateway-ns    │    │   app-ns        │    │   other-ns  │  │
+│  │                 │    │                 │    │             │  │
+│  │  ┌───────────┐  │    │  ┌───────────┐  │    │ ┌─────────┐ │  │
+│  │  │ gateway   │  │    │  │ upstream  │  │    │ │ other   │ │  │
+│  │  │ (allowed) │  │    │  │ (denied)  │  │    │ │ (denied)│ │  │
+│  │  │    ✅     │  │    │  │    ❌     │  │    │ │   ❌    │ │  │
+│  │  └───────────┘  │    │  └───────────┘  │    │ └─────────┘ │  │
+│  └─────────────────┘    └─────────────────┘    └─────────────┘  │
+│                                                                  │
+│  Only 'gateway' Pod in 'gateway-ns' can access OCI GenAI        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Option 2: Kubernetes Secrets
+
+Store OCI credentials as Kubernetes secrets.
+
+```bash
+# Create secret from your OCI credentials
+kubectl create secret generic oci-credentials \
+  --from-file=config=./docker-oci/config \
+  --from-file=oci_api_key.pem=./docker-oci/oci_api_key.pem
+
+# Deploy
+kubectl apply -f k8s/deployment-with-secrets.yaml
+```
+
+### Authentication Auto-Detection
+
+The gateway automatically detects the authentication method:
+
+| Environment | Authentication |
+|-------------|----------------|
+| `OCI_RESOURCE_PRINCIPAL_VERSION=2.2` | Workload Identity (OKE) |
+| `~/.oci/config` mounted | API Key (Docker/local) |
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Docker Image (safe to distribute)                      │
+│  ❌ No credentials baked in                              │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          │ Runtime mount
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│  Credentials (injected at runtime)                      │
+│  • Docker: -v ./docker-oci:/root/.oci                   │
+│  • OKE: Workload Identity (no files)                    │
+│  • K8s: Secrets mounted to /root/.oci                   │
+└─────────────────────────────────────────────────────────┘
+```
+
 ## Architecture
 
 The codebase is organized in a modular structure for better maintainability:
@@ -771,8 +955,11 @@ if __name__ == "__main__":
 
 - `config.json` is in `.gitignore` - never commit it
 - `.env` is in `.gitignore` - never commit debug auth token
+- `docker-oci/` is in `.gitignore` - never commit OCI credentials
 - Use OCI IAM policies to restrict model access
 - Use `debug_ui.auth_mode: "bearer"` with `DEBUG_UI_AUTH_TOKEN` in `.env`
+- **Docker images contain no credentials** - they are injected at runtime
+- For OKE, prefer Workload Identity over API keys
 - Monitor token usage and costs
 
 ## Future Enhancements
@@ -827,4 +1014,4 @@ For issues, questions, or contributions:
 ---
 
 **Last Updated**: 2026-03-05
-**Version**: 2.3 (Debug UI Auth + Swimlane Improvements)
+**Version**: 2.4 (Docker & Kubernetes Deployment Support)

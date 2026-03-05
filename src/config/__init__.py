@@ -139,15 +139,38 @@ class Config:
             raise
 
     def _init_oci_client(self) -> None:
-        """Initialize OCI GenAI client."""
+        """Initialize OCI GenAI client with multiple authentication methods.
+
+        Authentication priority:
+        1. OCI_RESOURCE_PRINCIPAL_VERSION env var -> Resource Principal (OKE/Functions)
+        2. ~/.oci/config file -> API Key authentication (local development)
+        """
         try:
-            sdk_config = oci.config.from_file('~/.oci/config', "DEFAULT")
-            self.genai_client = oci.generative_ai_inference.GenerativeAiInferenceClient(
-                config=sdk_config,
-                service_endpoint=self.endpoint,
-                retry_strategy=oci.retry.NoneRetryStrategy(),
-                timeout=(10, 360)
-            )
+            # Check for Resource Principal / Workload Identity
+            rp_version = os.environ.get("OCI_RESOURCE_PRINCIPAL_VERSION", "")
+
+            if rp_version:
+                # Use Resource Principal (for OKE Workload Identity, Functions, Instance Principal)
+                logger.info("Using OCI Resource Principal authentication")
+                signer = oci.auth.signers.get_resource_principals_signer()
+                self.genai_client = oci.generative_ai_inference.GenerativeAiInferenceClient(
+                    config={},
+                    signer=signer,
+                    service_endpoint=self.endpoint,
+                    retry_strategy=oci.retry.NoneRetryStrategy(),
+                    timeout=(10, 360)
+                )
+            else:
+                # Fallback to API Key authentication (local development)
+                logger.info("Using OCI API Key authentication from ~/.oci/config")
+                sdk_config = oci.config.from_file('~/.oci/config', "DEFAULT")
+                self.genai_client = oci.generative_ai_inference.GenerativeAiInferenceClient(
+                    config=sdk_config,
+                    service_endpoint=self.endpoint,
+                    retry_strategy=oci.retry.NoneRetryStrategy(),
+                    timeout=(10, 360)
+                )
+
             logger.info("OCI SDK initialized successfully")
         except Exception as e:
             logger.error(f"SDK configuration loading failed: {e}")

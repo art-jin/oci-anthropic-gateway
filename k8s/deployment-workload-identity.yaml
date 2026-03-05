@@ -1,0 +1,155 @@
+# OCI Anthropic Gateway - Kubernetes Deployment (Workload Identity)
+#
+# Prerequisites for OCI OKE Workload Identity:
+# 1. OKE cluster with Workload Identity enabled
+# 2. Create a Dynamic Group in OCI IAM (choose one):
+#
+#    Option A - Cluster-wide (all pods in cluster):
+#      ALL {resource.type = 'cluster', resource.id = '<your-cluster-ocid>'}
+#
+#    Option B - Namespace-scoped (only pods in specific namespace) [RECOMMENDED]:
+#      ALL {
+#        resource.type = 'cluster',
+#        resource.id = '<your-cluster-ocid>',
+#        request.principal.namespace = 'gateway-namespace'
+#      }
+#
+#    Option C - ServiceAccount-scoped (only specific service account) [MOST SECURE]:
+#      ALL {
+#        resource.type = 'cluster',
+#        resource.id = '<your-cluster-ocid>',
+#        request.principal.namespace = 'gateway-namespace',
+#        request.principal.service_account = 'oci-gateway-sa'
+#      }
+#
+# 3. Create IAM Policy to grant GenAI access:
+#    Allow dynamic-group <your-dynamic-group> to use generative-ai-inference in compartment <compartment>
+#
+# 4. Add annotation to ServiceAccount (see below)
+#
+# With Workload Identity, NO API keys are needed!
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oci-gateway-config
+data:
+  config.json: |
+    {
+      "compartment_id": "ocid1.compartment.oc1..your-compartment-id",
+      "endpoint": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+      "model_aliases": {
+        "claude-3-5-sonnet": "xai.grok-4-fast-non-reasoning"
+      },
+      "model_definitions": {
+        "xai.grok-4-fast-non-reasoning": {
+          "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.your-model-ocid",
+          "max_tokens_key": "max_tokens",
+          "temperature": 0.7
+        }
+      },
+      "default_model": "xai.grok-4-fast-non-reasoning",
+      "debug": false,
+      "server": {
+        "host": "0.0.0.0",
+        "port": 8000,
+        "log_level": "warning"
+      }
+    }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oci-gateway-sa
+  annotations:
+    # Workload Identity annotation - replace with your cluster OCID and namespace
+    oci.oracle.com/oci-workload-identity: "ocid1.compartment.oc1..your-compartment-id"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oci-anthropic-gateway
+  labels:
+    app: oci-anthropic-gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: oci-anthropic-gateway
+  template:
+    metadata:
+      labels:
+        app: oci-anthropic-gateway
+    spec:
+      serviceAccountName: oci-gateway-sa
+      containers:
+        - name: gateway
+          image: oci-anthropic-gateway:latest  # Replace with your image registry
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            # Enable Resource Principal authentication (triggers Workload Identity)
+            - name: OCI_RESOURCE_PRINCIPAL_VERSION
+              value: "2.2"
+            - name: LOG_LEVEL
+              value: "WARNING"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config.json
+              subPath: config.json
+              readOnly: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /debug/
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /debug/
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config-volume
+          configMap:
+            name: oci-gateway-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oci-anthropic-gateway
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+  selector:
+    app: oci-anthropic-gateway
+---
+# Optional: Ingress for external access
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: oci-anthropic-gateway
+# spec:
+#   ingressClassName: nginx
+#   rules:
+#     - host: gateway.your-domain.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: oci-anthropic-gateway
+#                 port:
+#                   number: 8000

@@ -1,0 +1,50 @@
+# OCI Anthropic Gateway - Docker Compose
+#
+# Usage:
+#   1. Copy config.json.template to config.json and fill in your values
+#   2. Copy .env.template to .env and fill in your values
+#   3. Create docker-oci/ directory with:
+#      - config (OCI config with key_file=/root/.oci/oci_api_key.pem)
+#      - oci_api_key.pem (your OCI API key)
+#   4. Run: docker-compose up -d
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: oci-anthropic-gateway:latest
+    container_name: oci-anthropic-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    volumes:
+      # Configuration files (read-only)
+      - ./config.json:/app/config.json:ro
+      - ./.env:/app/.env:ro
+      # OCI credentials (read-only) - use docker-oci directory for container-compatible paths
+      - ./docker-oci:/root/.oci:ro
+      # Debug dumps directory (optional, for persistence)
+      - ./debug_dumps:/app/debug_dumps
+    environment:
+      # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+      - LOG_LEVEL=${LOG_LEVEL:-WARNING}
+      # Debug UI auth token (can also be set in .env)
+      - DEBUG_UI_AUTH_TOKEN=${DEBUG_UI_AUTH_TOKEN:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/debug/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - gateway-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  gateway-network:
+    driver: bridge

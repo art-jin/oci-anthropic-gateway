@@ -311,6 +311,41 @@ oci==2.131.1
 
 ## Changelog
 
+### 2026-03-05: Docker & Kubernetes Deployment Support
+
+**New Feature:** Containerized deployment with multiple authentication methods.
+
+**Docker Files:**
+- `Dockerfile` - Python 3.12-slim based image
+- `docker-compose.yml` - Service orchestration
+- `.dockerignore` - Build optimization
+- `entrypoint.sh` - Startup script with auth detection
+
+**Kubernetes Files:**
+- `k8s/deployment-workload-identity.yaml` - OKE Workload Identity deployment (recommended)
+- `k8s/deployment-with-secrets.yaml` - Kubernetes Secrets deployment (alternative)
+
+**Authentication Methods:**
+1. **API Key** (local development) - Mount `~/.oci` directory
+2. **Workload Identity** (OKE) - Set `OCI_RESOURCE_PRINCIPAL_VERSION=2.2`, no API keys needed
+3. **Kubernetes Secrets** - Store OCI credentials as K8s secrets
+
+**Fine-grained Authorization (OKE):**
+| Scope | Dynamic Group Rule | Security |
+|-------|-------------------|----------|
+| Cluster-wide | `ALL {resource.type = 'cluster', resource.id = '<ocid>'}` | ⭐ Basic |
+| Namespace | `... + request.principal.namespace = 'gateway-ns'` | ⭐⭐ Better |
+| ServiceAccount | `... + request.principal.service_account = 'gateway-sa'` | ⭐⭐⭐ Best |
+
+**Code Changes:**
+- `src/config/__init__.py` - Auto-detect authentication method
+- `entrypoint.sh` - Validate auth configuration at startup
+
+**Security:**
+- No credentials baked into Docker image
+- Credentials injected at runtime via volume mounts or environment
+- Supports fine-grained IAM policies for Pod-level access control
+
 ### 2026-03-05: Real-time Swimlane Debug UI
 
 **New Feature:** Live visualization of message flow through the gateway.

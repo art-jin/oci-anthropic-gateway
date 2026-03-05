@@ -107,9 +107,26 @@ class Config:
                 logger.error(f"Default model '{self.default_model_name}' not found in definitions")
                 raise KeyError("Invalid default_model")
 
-            # Add compartment_id to default_model_conf for convenience
-            if "compartment_id" not in self.default_model_conf:
-                self.default_model_conf["compartment_id"] = self.compartment_id
+            # Normalize default model config so call sites can always rely on
+            # compartment_id and common defaults being present.
+            self.default_model_conf = self._normalize_model_conf(self.default_model_conf)
+
+            # Validate model definitions at startup to surface configuration issues early.
+            for model_name, model_conf in self.model_definitions.items():
+                normalized = self._normalize_model_conf(model_conf)
+                # Persist normalized config to keep runtime behavior consistent.
+                self.model_definitions[model_name] = normalized
+                if not normalized.get("compartment_id"):
+                    logger.warning(
+                        "Model '%s' has no compartment_id (and no global fallback). "
+                        "Requests to this model will fail.",
+                        model_name,
+                    )
+                if not normalized.get("ocid"):
+                    logger.warning(
+                        "Model '%s' has empty ocid. Requests to this model will fail.",
+                        model_name,
+                    )
 
             logger.info(
                 f"Config loaded. Default model: {self.default_model_name} (debug={self.debug}) "
@@ -157,14 +174,23 @@ class Config:
 
         if not target_alias:
             logger.info(f"Using default model config for: {model_name}")
-            return self.default_model_conf
+            return dict(self.default_model_conf)
 
         model_conf = self.model_definitions.get(target_alias)
         if model_conf:
             logger.info(f"Mapped '{model_name}' -> '{target_alias}' config")
-            return model_conf
+            return dict(model_conf)
 
-        return self.default_model_conf
+        return dict(self.default_model_conf)
+
+    def _normalize_model_conf(self, model_conf: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a normalized model config with global fallbacks applied."""
+        normalized = dict(model_conf or {})
+        if not normalized.get("compartment_id"):
+            normalized["compartment_id"] = self.compartment_id
+        if not normalized.get("max_tokens_key"):
+            normalized["max_tokens_key"] = "max_tokens"
+        return normalized
 
 
 # Global configuration instance

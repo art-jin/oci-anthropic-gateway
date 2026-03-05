@@ -24,6 +24,25 @@ from ..utils.debug_dump import DebugDumpConfig, write_debug_dump
 logger = logging.getLogger("oci-gateway")
 
 
+class OciTargetConfigError(ValueError):
+    """Raised when model routing configuration for OCI GenAI is incomplete."""
+
+
+def _validate_oci_targeting(model_conf: dict, requested_model: str) -> None:
+    """Fail fast with actionable errors for missing OCI routing fields."""
+    compartment_id = (model_conf or {}).get("compartment_id", "")
+    model_id = (model_conf or {}).get("ocid", "")
+    missing = []
+    if not compartment_id:
+        missing.append("compartment_id")
+    if not model_id:
+        missing.append("ocid")
+    if missing:
+        raise OciTargetConfigError(
+            f"Model '{requested_model}' missing required config field(s): {', '.join(missing)}"
+        )
+
+
 def _has_tool_call_markers(text: str) -> dict:
     if not isinstance(text, str):
         text = str(text)
@@ -290,6 +309,7 @@ RULES:
     chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(
         model_id=model_conf.get("ocid", "")
     )
+    _validate_oci_targeting(model_conf, requested_model)
 
     # Validate genai_client
     if genai_client is None:
@@ -575,6 +595,17 @@ RULES:
 
     except Exception as e:
         logger.exception("Non-streaming output exception")
+        if isinstance(e, OciTargetConfigError):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": str(e),
+                    },
+                },
+            )
         if debug_conf.enabled:
             if oci_call_started and not oci_call_completed:
                 write_debug_dump(
@@ -795,6 +826,7 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
     chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(
         model_id=model_conf.get("ocid", "")
     )
+    _validate_oci_targeting(model_conf, requested_model)
 
     # Validate genai_client
     if genai_client is None:
@@ -1114,7 +1146,17 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
         logger.exception("Streaming output exception")
         error_str = str(e).lower()
         is_retryable = "timeout" in error_str or "connection" in error_str
-        error_type = "timeout_error" if "timeout" in error_str else "internal_error"
+        if isinstance(e, OciTargetConfigError):
+            error_type = "invalid_request_error"
+            is_retryable = False
+            client_message = str(e)
+        else:
+            error_type = "timeout_error" if "timeout" in error_str else "internal_error"
+            client_message = (
+                "Request timed out. Please retry."
+                if is_retryable
+                else "An internal error occurred. Please check the logs for details."
+            )
         if debug_conf.enabled:
             if oci_call_started and not oci_call_completed:
                 write_debug_dump(
@@ -1147,7 +1189,7 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
             'type': 'error',
             'error': {
                 'type': error_type,
-                'message': 'Request timed out. Please retry.' if is_retryable else 'An internal error occurred. Please check the logs for details.',
+                'message': client_message,
                 'retryable': is_retryable
             }
         })}\n\n"

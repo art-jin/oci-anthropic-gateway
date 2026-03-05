@@ -50,7 +50,7 @@
         "temperature": 0.7
       }
   },
-  "default_model": "xai.grok-4-fast-non-reasoning",
+  "default_model": "openai.gpt-oss-20b",
   "debug": false,
   "debug_ui": {
     "enabled": false,

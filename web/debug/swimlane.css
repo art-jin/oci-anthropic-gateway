@@ -278,9 +278,118 @@
   border-radius: 6px;
 }
 
-.detail-panel .json {
+.json-viewer-wrap {
   flex: 1;
-  margin: 0;
+  min-height: 0;
+}
+
+.json-viewer {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 0;
+  overflow: auto;
+  max-height: 540px;
+  font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.json-node {
+  display: block;
+}
+
+.json-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 10px 1px calc(10px + var(--depth, 0) * 16px);
+  min-height: 20px;
+  white-space: nowrap;
+}
+
+.json-row:hover {
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.json-line-no {
+  width: 38px;
+  text-align: right;
+  color: #64748b;
+  flex: 0 0 auto;
+  user-select: none;
+}
+
+.json-toggle {
+  border: 0;
+  background: transparent;
+  color: #93c5fd;
+  padding: 0;
+  width: 14px;
+  cursor: pointer;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.json-toggle:hover {
+  color: #bfdbfe;
+}
+
+.json-lit {
+  color: #94a3b8;
+}
+
+.json-key {
+  color: #93c5fd;
+}
+
+.json-index {
+  color: #7dd3fc;
+}
+
+.json-bracket {
+  color: #f8fafc;
+}
+
+.json-string {
+  color: #86efac;
+  max-width: min(58vw, 840px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.json-number {
+  color: #fca5a5;
+}
+
+.json-boolean {
+  color: #fcd34d;
+}
+
+.json-null {
+  color: #c4b5fd;
+}
+
+.json-copy-path {
+  margin-left: auto;
+  border: 1px solid #334155;
+  background: #0b1222;
+  color: #93c5fd;
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 1px 5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.json-row:hover .json-copy-path {
+  opacity: 1;
+}
+
+.json-copy-path:hover {
+  border-color: #3b82f6;
+  color: #dbeafe;
 }
 
 /* Loading State */

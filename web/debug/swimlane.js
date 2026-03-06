@@ -516,9 +516,14 @@ class SwimlaneTimeline {
         <div class="detail-actions">
           <button onclick="SwimlaneTimeline.copyJson(this)">Copy JSON</button>
           <button onclick="SwimlaneTimeline.downloadJson(this, '${esc(event.kind)}')">Download</button>
+          <button onclick="SwimlaneTimeline.expandAllJson(this)">Expand All</button>
+          <button onclick="SwimlaneTimeline.collapseAllJson(this)">Collapse All</button>
         </div>
-        <pre class="json">${esc(fmtJson(data))}</pre>
+        <div class="json-viewer-wrap">
+          <div class="json-viewer" aria-label="JSON detail viewer"></div>
+        </div>
       `;
+      SwimlaneTimeline.renderJsonViewer(this.detailPanel, data);
     } catch (err) {
       this.detailPanel.innerHTML = `<div class="error">Failed to load: ${err.message}</div>`;
     }
@@ -528,29 +533,321 @@ class SwimlaneTimeline {
    * Copy JSON to clipboard
    */
   static copyJson(button) {
-    const pre = button.closest('.detail-panel').querySelector('pre.json');
-    if (pre) {
-      navigator.clipboard.writeText(pre.textContent).then(() => {
-        button.textContent = 'Copied!';
-        setTimeout(() => button.textContent = 'Copy JSON', 1500);
-      });
-    }
+    const panel = button.closest('.detail-panel');
+    const raw = SwimlaneTimeline.getPanelJsonText(panel);
+    if (!raw) return;
+    navigator.clipboard.writeText(raw).then(() => {
+      button.textContent = 'Copied!';
+      setTimeout(() => button.textContent = 'Copy JSON', 1500);
+    });
   }
 
   /**
    * Download JSON as file
    */
   static downloadJson(button, kind) {
-    const pre = button.closest('.detail-panel').querySelector('pre.json');
-    if (pre) {
-      const blob = new Blob([pre.textContent], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${kind}_${Date.now()}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+    const panel = button.closest('.detail-panel');
+    const raw = SwimlaneTimeline.getPanelJsonText(panel);
+    if (!raw) return;
+    const blob = new Blob([raw], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${kind}_${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Expand all nodes in JSON viewer
+   */
+  static expandAllJson(button) {
+    const panel = button.closest('.detail-panel');
+    SwimlaneTimeline.setAllJsonNodesExpanded(panel, true);
+  }
+
+  /**
+   * Collapse all nodes in JSON viewer
+   */
+  static collapseAllJson(button) {
+    const panel = button.closest('.detail-panel');
+    SwimlaneTimeline.setAllJsonNodesExpanded(panel, false);
+  }
+
+  /**
+   * Get serialized JSON text from panel state
+   */
+  static getPanelJsonText(panel) {
+    if (!panel) return '';
+    if (typeof panel._rawJsonText === 'string' && panel._rawJsonText.length > 0) {
+      return panel._rawJsonText;
     }
+    return '';
+  }
+
+  /**
+   * Render interactive JSON viewer with folding and path copy
+   */
+  static renderJsonViewer(panel, data) {
+    if (!panel) return;
+    const viewer = panel.querySelector('.json-viewer');
+    if (!viewer) return;
+
+    panel._rawJsonText = fmtJson(data);
+    panel._jsonData = data;
+    viewer.innerHTML = '';
+
+    const lineCounter = { value: 1 };
+    const rootPath = '$';
+    const rootNode = SwimlaneTimeline.renderJsonNode({
+      value: data,
+      key: '',
+      path: rootPath,
+      depth: 0,
+      isLast: true,
+      lineCounter,
+      defaultExpandDepth: 2
+    });
+    viewer.appendChild(rootNode);
+
+    viewer.addEventListener('click', (e) => {
+      const toggle = e.target.closest('.json-toggle');
+      if (toggle) {
+        e.preventDefault();
+        const node = toggle.closest('.json-node');
+        if (node) {
+          const expanded = node.dataset.expanded === '1';
+          SwimlaneTimeline.setJsonNodeExpanded(node, !expanded);
+        }
+        return;
+      }
+
+      const copyBtn = e.target.closest('.json-copy-path');
+      if (copyBtn) {
+        e.preventDefault();
+        const path = copyBtn.getAttribute('data-path') || '';
+        if (!path) return;
+        navigator.clipboard.writeText(path).then(() => {
+          const original = copyBtn.textContent;
+          copyBtn.textContent = 'Copied';
+          setTimeout(() => {
+            copyBtn.textContent = original;
+          }, 1000);
+        });
+      }
+    });
+  }
+
+  /**
+   * Render one JSON node recursively
+   */
+  static renderJsonNode(opts) {
+    const { value, key, isArrayIndex, path, depth, isLast, lineCounter, defaultExpandDepth } = opts;
+    const isArray = Array.isArray(value);
+    const isObject = value && typeof value === 'object' && !isArray;
+    const isContainer = isArray || isObject;
+
+    if (!isContainer) {
+      return SwimlaneTimeline.renderPrimitiveRow({ value, key, isArrayIndex, path, depth, isLast, lineCounter });
+    }
+
+    const node = document.createElement('div');
+    node.className = 'json-node';
+    const expanded = depth < defaultExpandDepth;
+    node.dataset.expanded = expanded ? '1' : '0';
+
+    const openRow = document.createElement('div');
+    openRow.className = 'json-row json-open';
+    openRow.style.setProperty('--depth', String(depth));
+    openRow.appendChild(SwimlaneTimeline.lineNo(lineCounter.value++));
+
+    const toggle = document.createElement('button');
+    toggle.className = 'json-toggle';
+    toggle.type = 'button';
+    toggle.textContent = expanded ? '▾' : '▸';
+    toggle.setAttribute('aria-label', expanded ? 'Collapse' : 'Expand');
+    openRow.appendChild(toggle);
+
+    if (key !== '') {
+      if (isArrayIndex) {
+        openRow.appendChild(SwimlaneTimeline.indexSpan(key));
+      } else {
+        openRow.appendChild(SwimlaneTimeline.keySpan(key));
+      }
+      openRow.appendChild(SwimlaneTimeline.literal(': '));
+    }
+    openRow.appendChild(SwimlaneTimeline.bracketSpan(isArray ? '[' : '{'));
+    openRow.appendChild(SwimlaneTimeline.copyPathButton(path));
+    node.appendChild(openRow);
+
+    const childrenWrap = document.createElement('div');
+    childrenWrap.className = 'json-children';
+    if (!expanded) childrenWrap.style.display = 'none';
+    node.appendChild(childrenWrap);
+
+    const entries = isArray
+      ? value.map((item, idx) => [idx, item])
+      : Object.entries(value);
+    entries.forEach(([childKey, childValue], idx) => {
+      const childPath = SwimlaneTimeline.joinPath(path, childKey, isArray);
+      childrenWrap.appendChild(SwimlaneTimeline.renderJsonNode({
+        value: childValue,
+        key: String(childKey),
+        isArrayIndex: isArray,
+        path: childPath,
+        depth: depth + 1,
+        isLast: idx === entries.length - 1,
+        lineCounter,
+        defaultExpandDepth
+      }));
+    });
+
+    const closeRow = document.createElement('div');
+    closeRow.className = 'json-row json-close';
+    closeRow.style.setProperty('--depth', String(depth));
+    closeRow.appendChild(SwimlaneTimeline.lineNo(lineCounter.value++));
+    closeRow.appendChild(SwimlaneTimeline.literal(isArray ? ']' : '}'));
+    if (!isLast) closeRow.appendChild(SwimlaneTimeline.literal(','));
+    node.appendChild(closeRow);
+
+    return node;
+  }
+
+  /**
+   * Render primitive value row
+   */
+  static renderPrimitiveRow(opts) {
+    const { value, key, isArrayIndex, path, depth, isLast, lineCounter } = opts;
+    const row = document.createElement('div');
+    row.className = 'json-row';
+    row.style.setProperty('--depth', String(depth));
+    row.appendChild(SwimlaneTimeline.lineNo(lineCounter.value++));
+    if (key !== '') {
+      if (isArrayIndex) {
+        row.appendChild(SwimlaneTimeline.indexSpan(key));
+      } else {
+        row.appendChild(SwimlaneTimeline.keySpan(key));
+      }
+      row.appendChild(SwimlaneTimeline.literal(': '));
+    }
+    row.appendChild(SwimlaneTimeline.valueSpan(value));
+    row.appendChild(SwimlaneTimeline.copyPathButton(path));
+    if (!isLast) row.appendChild(SwimlaneTimeline.literal(','));
+    return row;
+  }
+
+  static setAllJsonNodesExpanded(panel, expanded) {
+    if (!panel) return;
+    const nodes = panel.querySelectorAll('.json-node');
+    nodes.forEach((node) => SwimlaneTimeline.setJsonNodeExpanded(node, expanded));
+  }
+
+  static setJsonNodeExpanded(node, expanded) {
+    node.dataset.expanded = expanded ? '1' : '0';
+    const toggle = node.querySelector(':scope > .json-row .json-toggle');
+    if (toggle) {
+      toggle.textContent = expanded ? '▾' : '▸';
+      toggle.setAttribute('aria-label', expanded ? 'Collapse' : 'Expand');
+    }
+    const children = node.querySelector(':scope > .json-children');
+    if (children) {
+      children.style.display = expanded ? '' : 'none';
+    }
+  }
+
+  static joinPath(parentPath, key, parentIsArray) {
+    const keyText = String(key);
+    if (parentIsArray) {
+      return `${parentPath}[${keyText}]`;
+    }
+    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(keyText)) {
+      return parentPath === '$' ? `$.${keyText}` : `${parentPath}.${keyText}`;
+    }
+    return `${parentPath}[${JSON.stringify(keyText)}]`;
+  }
+
+  static lineNo(number) {
+    const el = document.createElement('span');
+    el.className = 'json-line-no';
+    el.textContent = String(number);
+    return el;
+  }
+
+  static literal(text) {
+    const el = document.createElement('span');
+    el.className = 'json-lit';
+    el.textContent = text;
+    return el;
+  }
+
+  static keySpan(key) {
+    const el = document.createElement('span');
+    el.className = 'json-key';
+    el.textContent = `"${key}"`;
+    return el;
+  }
+
+  static indexSpan(key) {
+    const el = document.createElement('span');
+    el.className = 'json-index';
+    el.textContent = `[${key}]`;
+    return el;
+  }
+
+  static bracketSpan(text) {
+    const el = document.createElement('span');
+    el.className = 'json-bracket';
+    el.textContent = text;
+    return el;
+  }
+
+  static copyPathButton(path) {
+    const btn = document.createElement('button');
+    btn.className = 'json-copy-path';
+    btn.type = 'button';
+    btn.setAttribute('data-path', path || '$');
+    btn.textContent = 'Copy Path';
+    return btn;
+  }
+
+  static valueSpan(value) {
+    const el = document.createElement('span');
+    const MAX_VALUE_CHARS = 120;
+
+    if (value === null) {
+      el.className = 'json-null';
+      el.textContent = 'null';
+      return el;
+    }
+
+    const valueType = typeof value;
+    if (valueType === 'string') {
+      el.className = 'json-string';
+      const full = JSON.stringify(value);
+      if (full.length > MAX_VALUE_CHARS) {
+        el.textContent = `${full.slice(0, MAX_VALUE_CHARS)}...`;
+        el.title = full;
+      } else {
+        el.textContent = full;
+      }
+      return el;
+    }
+
+    if (valueType === 'number') {
+      el.className = 'json-number';
+      el.textContent = String(value);
+      return el;
+    }
+
+    if (valueType === 'boolean') {
+      el.className = 'json-boolean';
+      el.textContent = value ? 'true' : 'false';
+      return el;
+    }
+
+    el.className = 'json-string';
+    el.textContent = JSON.stringify(value);
+    return el;
   }
 
   /**

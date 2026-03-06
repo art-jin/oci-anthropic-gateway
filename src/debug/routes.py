@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import secrets
@@ -36,24 +38,46 @@ def _enforce_auth(request: Request) -> None:
     mode = conf.debug_ui_auth_mode
     if mode == "none":
         return
-    if mode != "bearer":
-        raise HTTPException(status_code=500, detail=f"Unsupported debug_ui auth_mode: {mode}")
-
-    expected = str(getattr(conf, "debug_ui_auth_token", "") or "").strip()
-    if not expected:
-        raise HTTPException(status_code=500, detail="Debug UI auth token is not configured")
-
-    provided = ""
     auth = (request.headers.get("authorization") or "").strip()
-    if auth.lower().startswith("bearer "):
-        provided = auth[7:].strip()
-    if not provided:
-        provided = str(request.query_params.get("access_token", "")).strip()
 
-    if not provided:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    if not secrets.compare_digest(provided, expected):
-        raise HTTPException(status_code=403, detail="Invalid bearer token")
+    if mode == "bearer":
+        expected = str(getattr(conf, "debug_ui_auth_token", "") or "").strip()
+        if not expected:
+            raise HTTPException(status_code=500, detail="Debug UI auth token is not configured")
+
+        provided = ""
+        if auth.lower().startswith("bearer "):
+            provided = auth[7:].strip()
+        if not provided:
+            provided = str(request.query_params.get("access_token", "")).strip()
+
+        if not provided:
+            raise HTTPException(status_code=401, detail="Missing bearer token")
+        if not secrets.compare_digest(provided, expected):
+            raise HTTPException(status_code=403, detail="Invalid bearer token")
+        return
+
+    if mode == "basic":
+        expected_user = str(getattr(conf, "debug_ui_auth_basic_user", "") or "").strip()
+        expected_password = str(getattr(conf, "debug_ui_auth_basic_password", "") or "")
+        if not expected_user or not expected_password:
+            raise HTTPException(status_code=500, detail="Debug UI basic auth credentials are not configured")
+
+        if not auth.lower().startswith("basic "):
+            raise HTTPException(status_code=401, detail="Missing basic auth header")
+
+        encoded = auth[6:].strip()
+        try:
+            decoded = base64.b64decode(encoded).decode("utf-8")
+            username, password = decoded.split(":", 1)
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            raise HTTPException(status_code=401, detail="Invalid basic auth header")
+
+        if not secrets.compare_digest(username, expected_user) or not secrets.compare_digest(password, expected_password):
+            raise HTTPException(status_code=403, detail="Invalid basic auth credentials")
+        return
+
+    raise HTTPException(status_code=500, detail=f"Unsupported debug_ui auth_mode: {mode}")
 
 
 @debug_router.get("/health")

@@ -75,6 +75,7 @@ class DebugRepository:
 
                 CREATE INDEX IF NOT EXISTS idx_messages_session_ts ON messages(session_id, ts DESC);
                 CREATE INDEX IF NOT EXISTS idx_dumps_kind_ts ON dumps(kind, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_dumps_session_ts ON dumps(session_id, ts DESC);
                 CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_ts ON tool_calls(tool_name, ts DESC);
                 """
             )

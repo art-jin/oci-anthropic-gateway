@@ -8,15 +8,13 @@ This refactored version splits the monolithic gateway.py into logical modules:
 """
 
 import asyncio
-import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Union, List
+from typing import Optional
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-import oci
 import uvicorn
 from dotenv import load_dotenv
 
@@ -26,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 load_dotenv()
 
 # Initialize logging with custom configuration
-from src.utils.logging_config import get_logger, set_log_level
+from src.utils.logging_config import get_logger
 logger = get_logger()
 
 # Create FastAPI app
@@ -37,12 +35,47 @@ from src.config import init_config, get_config
 from src.routes import handle_count_tokens, handle_messages_request
 from src.debug import debug_router, DebugDumpIndexer
 from src.debug.routes import broadcast_session_event
-from src.utils.constants import DEFAULT_MAX_TOKENS
+from src.utils.rate_limiter import SlidingWindowRateLimiter
 
 app.include_router(debug_router, prefix="/debug/api")
 _debug_ui_dir = Path("web/debug")
 if _debug_ui_dir.exists():
     app.mount("/debug", StaticFiles(directory=str(_debug_ui_dir), html=True), name="debug-ui")
+
+
+def _build_rate_limit_key(request: Request, body: dict) -> str:
+    client_ip = request.client.host if request.client else "unknown"
+    session_id = ""
+    if isinstance(body, dict):
+        metadata = body.get("metadata")
+        if isinstance(metadata, dict):
+            session_id = str(metadata.get("session_id") or "").strip()
+    if session_id:
+        return f"{client_ip}:{session_id}"
+    return client_ip
+
+
+def _check_rate_limit(request: Request, body: dict) -> Optional[JSONResponse]:
+    limiter = getattr(app.state, "rate_limiter", None)
+    if limiter is None:
+        return None
+
+    key = _build_rate_limit_key(request, body)
+    allowed, retry_after = limiter.allow(key)
+    if allowed:
+        return None
+
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(retry_after)},
+        content={
+            "type": "error",
+            "error": {
+                "type": "rate_limit_error",
+                "message": "Too many requests. Please retry later.",
+            },
+        },
+    )
 
 
 @app.on_event("startup")
@@ -65,6 +98,14 @@ async def _startup() -> None:
     else:
         app.state.debug_indexer = None
         app.state.debug_indexer_task = None
+
+    if cfg.rate_limit_enabled:
+        app.state.rate_limiter = SlidingWindowRateLimiter(
+            limit=cfg.rate_limit_requests,
+            window_sec=cfg.rate_limit_window_sec,
+        )
+    else:
+        app.state.rate_limiter = None
 
 
 @app.on_event("shutdown")
@@ -91,11 +132,17 @@ async def catch_all(path: str, request: Request):
     # Handle count_tokens endpoint
     if "count_tokens" in path:
         body = await request.json()
+        limited = _check_rate_limit(request, body)
+        if limited:
+            return limited
         return await handle_count_tokens(body)
 
     # Handle messages request
     if "messages" in path:
         body = await request.json()
+        limited = _check_rate_limit(request, body)
+        if limited:
+            return limited
         config = get_config()
         return await handle_messages_request(body, body.get("model", "").lower(), config)
 

@@ -721,9 +721,9 @@ For complete logging documentation, see [LOGGING.md](LOGGING.md).
 
 The gateway includes a real-time **Swimlane Debug UI** for visualizing message flows through the gateway.
 
-### Authentication (Bearer Token)
+### Authentication (Bearer/Basic)
 
-Debug API now supports bearer-token authentication for production use.
+Debug API supports bearer-token and basic authentication for production use.
 
 1. Copy token template and set your token:
    ```bash
@@ -731,15 +731,25 @@ Debug API now supports bearer-token authentication for production use.
    # edit .env
    # DEBUG_UI_AUTH_TOKEN=your-long-random-token
    ```
-2. Enable bearer mode in `config.json`:
+2. Enable auth mode in `config.json`:
    ```json
    {
      "debug_ui": {
        "enabled": true,
-       "auth_mode": "bearer"
+        "auth_mode": "bearer"
      }
    }
    ```
+   Basic auth mode:
+   ```json
+   {
+     "debug_ui": {
+       "enabled": true,
+       "auth_mode": "basic"
+     }
+   }
+   ```
+   with env vars `DEBUG_UI_BASIC_USER` and `DEBUG_UI_BASIC_PASSWORD`.
 3. Restart gateway and open Debug UI.
 
 Access behavior:
@@ -957,7 +967,7 @@ if __name__ == "__main__":
 - `.env` is in `.gitignore` - never commit debug auth token
 - `docker-oci/` is in `.gitignore` - never commit OCI credentials
 - Use OCI IAM policies to restrict model access
-- Use `debug_ui.auth_mode: "bearer"` with `DEBUG_UI_AUTH_TOKEN` in `.env`
+- Use `debug_ui.auth_mode: "bearer"` with `DEBUG_UI_AUTH_TOKEN` in `.env`, or `auth_mode: "basic"` with `DEBUG_UI_BASIC_USER`/`DEBUG_UI_BASIC_PASSWORD`
 - **Docker images contain no credentials** - they are injected at runtime
 - For OKE, prefer Workload Identity over API keys
 - Monitor token usage and costs

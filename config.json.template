@@ -52,6 +52,13 @@
   },
   "default_model": "openai.gpt-oss-20b",
   "debug": false,
+  "enable_nl_tool_fallback": false,
+  "messages_max_items": 200,
+  "rate_limit": {
+    "enabled": false,
+    "requests": 60,
+    "window_sec": 60
+  },
   "debug_ui": {
     "enabled": false,
     "dump_dir": "debug_dumps",

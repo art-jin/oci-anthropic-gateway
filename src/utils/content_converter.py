@@ -6,27 +6,9 @@ import re
 import uuid
 from typing import Optional, Union, List
 import oci
+from .tool_normalization import normalize_tool_name, normalize_tool_input
 
 logger = logging.getLogger("oci-gateway")
-
-TOOL_NAME_ALIASES = {
-    "web_search": "WebSearch",
-    "websearch": "WebSearch",
-    "read_file": "Read",
-    "ask_user_question": "AskUserQuestion",
-}
-
-def normalize_tool_name(name: str) -> str:
-    if not name:
-        return name
-    k = name.strip().replace("-", "_")
-    return TOOL_NAME_ALIASES.get(k, TOOL_NAME_ALIASES.get(k.lower(), name))
-
-def normalize_tool_input(tool_name: str, tool_input: dict) -> dict:
-    if tool_name == "AskUserQuestion" and isinstance(tool_input, dict):
-        if "questions" not in tool_input and "question" in tool_input:
-            return {"questions": [tool_input["question"]]}
-    return tool_input
 
 def convert_content_to_oci(content: Union[str, List[dict]]) -> Union[str, List]:
     """

@@ -38,7 +38,14 @@ class Config:
         self.debug_ui_scan_interval_sec: int = 3
         self.debug_ui_auth_mode: str = "none"
         self.debug_ui_auth_token: str = ""
+        self.debug_ui_auth_basic_user: str = ""
+        self.debug_ui_auth_basic_password: str = ""
         self.debug_ui_max_detail_bytes: int = 2_000_000
+        self.enable_nl_tool_fallback: bool = False
+        self.messages_max_items: int = 200
+        self.rate_limit_enabled: bool = False
+        self.rate_limit_requests: int = 60
+        self.rate_limit_window_sec: int = 60
         self.server_host: str = "127.0.0.1"
         self.server_port: int = 8000
         self.server_log_level: str = "warning"
@@ -69,7 +76,27 @@ class Config:
             self.debug_ui_scan_interval_sec = int(debug_ui.get("scan_interval_sec", 3))
             self.debug_ui_auth_mode = str(debug_ui.get("auth_mode", "none")).strip().lower()
             self.debug_ui_auth_token = str(os.getenv("DEBUG_UI_AUTH_TOKEN", "")).strip()
+            self.debug_ui_auth_basic_user = str(os.getenv("DEBUG_UI_BASIC_USER", "")).strip()
+            self.debug_ui_auth_basic_password = str(os.getenv("DEBUG_UI_BASIC_PASSWORD", "")).strip()
             self.debug_ui_max_detail_bytes = int(debug_ui.get("max_detail_bytes", 2_000_000))
+            self.enable_nl_tool_fallback = bool(custom_config.get("enable_nl_tool_fallback", False))
+            self.messages_max_items = int(custom_config.get("messages_max_items", 200))
+
+            if self.messages_max_items < 1:
+                raise ValueError("Invalid messages_max_items in config.json (must be >=1)")
+
+            rate_limit = custom_config.get("rate_limit", {})
+            self.rate_limit_enabled = bool(rate_limit.get("enabled", False))
+            self.rate_limit_requests = int(rate_limit.get("requests", 60))
+            self.rate_limit_window_sec = int(rate_limit.get("window_sec", 60))
+            if self.rate_limit_requests < 1:
+                raise ValueError("Invalid rate_limit.requests in config.json (must be >=1)")
+            if self.rate_limit_window_sec < 1:
+                raise ValueError("Invalid rate_limit.window_sec in config.json (must be >=1)")
+
+            allowed_auth_modes = {"none", "bearer", "basic"}
+            if self.debug_ui_auth_mode not in allowed_auth_modes:
+                raise ValueError("Invalid debug_ui.auth_mode in config.json (allowed: none,bearer,basic)")
 
             server_conf = custom_config.get("server", {})
             host = server_conf.get("host", "127.0.0.1")
@@ -131,6 +158,8 @@ class Config:
             logger.info(
                 f"Config loaded. Default model: {self.default_model_name} (debug={self.debug}) "
                 f"debug_ui={self.debug_ui_enabled} "
+                f"rate_limit={self.rate_limit_enabled} "
+                f"nl_fallback={self.enable_nl_tool_fallback} "
                 f"server={self.server_host}:{self.server_port} log_level={self.server_log_level}"
             )
 

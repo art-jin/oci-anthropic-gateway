@@ -1,23 +1,18 @@
 """API routes for OCI Anthropic Gateway."""
 
-import asyncio
-import json
 import logging
 import oci
 import uuid
-from typing import Optional, Union, List
-from fastapi import Request
+from typing import Union
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from ..config import get_config
 from ..utils.token import count_tokens_from_messages
 from ..utils.cache import extract_cache_control, log_cache_info
 from ..utils.content_converter import (
     convert_content_to_oci,
     convert_anthropic_messages_to_cohere,
 )
-from ..utils.tools import anthropic_to_cohere_tools, _build_tool_use_instruction
-from ..utils.constants import DEFAULT_MAX_TOKENS
+from ..utils.request_validation import validate_count_tokens_payload, validate_messages_payload
 
 logger = logging.getLogger("oci-gateway")
 
@@ -35,6 +30,19 @@ async def handle_count_tokens(body: dict) -> JSONResponse:
         JSONResponse with token count
     """
     try:
+        err = validate_count_tokens_payload(body)
+        if err:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": err,
+                    },
+                },
+            )
+
         messages = body.get("messages", [])
         system = body.get("system")
 
@@ -76,6 +84,20 @@ async def handle_messages_request(
         StreamingResponse or JSONResponse
     """
     request_metadata = body.get("metadata")
+    max_messages = int(getattr(app_config, "messages_max_items", 200) or 200)
+    validation_err = validate_messages_payload(body, max_messages=max_messages)
+    if validation_err:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": validation_err,
+                },
+            },
+        )
+
     if not isinstance(request_metadata, dict):
         request_metadata = {}
     session_id = request_metadata.get("session_id") or f"sess_{uuid.uuid4().hex}"
@@ -186,14 +208,12 @@ async def handle_messages_request(
     cohere_messages = None
     if is_cohere:
         # Convert messages to Cohere format
-        system_prompt = body.get("system")
-        messages = body.get("messages", [])
         current_message, chat_history, system_message = convert_anthropic_messages_to_cohere(messages, system_prompt)
         cohere_messages = (current_message, chat_history, system_message)
         logger.info(f"Converted to Cohere format: current_message_len={len(current_message)}, chat_history_len={len(chat_history)}")
 
     # Add tools to parameters if present
-    params_with_tools = _prepare_tools_params(body, is_cohere, oci_msgs)
+    params_with_tools = _prepare_tools_params(body, is_cohere, oci_msgs, app_config)
 
     # Generate response
     logger.debug(f"About to call generation with genai_client={app_config.genai_client is not None}")
@@ -232,7 +252,7 @@ async def handle_messages_request(
         )
 
 
-def _prepare_tools_params(body: dict, is_cohere: bool, oci_msgs: list) -> dict:
+def _prepare_tools_params(body: dict, is_cohere: bool, oci_msgs: list, app_config) -> dict:
     """Prepare parameters with tool instructions if needed.
 
     Args:
@@ -248,5 +268,6 @@ def _prepare_tools_params(body: dict, is_cohere: bool, oci_msgs: list) -> dict:
     if "tools" in params:
         # Tool instruction injection is handled in generation.py
         pass
+    params["enable_nl_tool_fallback"] = bool(getattr(app_config, "enable_nl_tool_fallback", False))
 
     return params

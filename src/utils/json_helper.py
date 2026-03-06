@@ -7,38 +7,9 @@ import uuid
 from typing import Optional, List
 
 from .constants import MIN_JSON_LENGTH, _TOOL_CALL_START_PATTERN, _TOOL_CALL_END_PATTERN
+from .tool_normalization import normalize_tool_name, normalize_tool_input
 
 logger = logging.getLogger("oci-gateway")
-
-# Tool name normalization (compatibility with snake_case outputs from some models)
-TOOL_NAME_ALIASES = {
-    "web_search": "WebSearch",
-    "websearch": "WebSearch",
-    "read_file": "Read",
-    "ask_user_question": "AskUserQuestion",
-    "read": "Read",
-    "write": "Write",
-    "edit": "Edit",
-    "multiedit": "MultiEdit",
-    "multi_edit": "MultiEdit",
-    "ls": "LS",
-    "glob": "Glob",
-    "bash": "Bash",
-    "todowrite": "TodoWrite",
-}
-
-def normalize_tool_name(name: str) -> str:
-    if not name:
-        return name
-    k = name.strip().replace("-", "_")
-    return TOOL_NAME_ALIASES.get(k, TOOL_NAME_ALIASES.get(k.lower(), name))
-
-def normalize_tool_input(tool_name: str, tool_input: dict) -> dict:
-    # AskUserQuestion compatibility: accept {"question": "..."} and convert to {"questions": ["..."]}
-    if tool_name == "AskUserQuestion" and isinstance(tool_input, dict):
-        if "questions" not in tool_input and "question" in tool_input:
-            return {"questions": [tool_input["question"]]}
-    return tool_input
 
 def _advance_search_position(end_match, start: int, start_tag_length: int) -> int:
     """

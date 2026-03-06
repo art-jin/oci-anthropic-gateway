@@ -464,8 +464,9 @@ RULES:
                             trace_ctx=trace_ctx,
                         )
                     
-                    # If no tool calls found with primary method and we have tools, try natural language fallback
-                    if not tool_calls_in_text and "tools" in params and params["tools"]:
+                    enable_nl_tool_fallback = bool(params.get("enable_nl_tool_fallback", False))
+                    # If enabled and no tool calls found with primary method, try NL fallback.
+                    if enable_nl_tool_fallback and not tool_calls_in_text and "tools" in params and params["tools"]:
                         tool_names = [t.get("name") for t in params["tools"] if isinstance(t, dict) and t.get("name")]
                         logger.info(f"Trying natural language fallback for {len(tool_names)} available tools")
                         tool_calls_in_text = detect_natural_language_tool_calls(text_to_check, tool_names)
@@ -478,12 +479,28 @@ RULES:
                                 message_id,
                                 "tool_detection_fallback",
                                 {
+                                    "enabled": enable_nl_tool_fallback,
                                     "available_tools_count": len(tool_names),
                                     "available_tools_sample": tool_names[:50],
                                     "detected": tool_calls_in_text,
                                 },
                                 trace_ctx=trace_ctx,
                             )
+                    elif debug_conf.enabled and "tools" in params and params["tools"]:
+                        write_debug_dump(
+                            debug_conf,
+                            message_id,
+                            "tool_detection_fallback",
+                            {
+                                "enabled": enable_nl_tool_fallback,
+                                "available_tools_count": len(
+                                    [t for t in params["tools"] if isinstance(t, dict) and t.get("name")]
+                                ),
+                                "available_tools_sample": [],
+                                "detected": [],
+                            },
+                            trace_ctx=trace_ctx,
+                        )
                     
                     if tool_calls_in_text:
                         clean_text = text_to_check

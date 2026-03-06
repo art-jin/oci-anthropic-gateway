@@ -120,6 +120,7 @@ async def generate_oci_non_stream(
     cohere_messages=None,
     *,
     debug_enabled: bool = False,
+    debug_redact_media: bool = True,
     trace_ctx: Optional[dict] = None,
 ):
     """
@@ -315,7 +316,7 @@ RULES:
     if genai_client is None:
         raise ValueError("genai_client cannot be None")
 
-    debug_conf = DebugDumpConfig(enabled=bool(debug_enabled))
+    debug_conf = DebugDumpConfig(enabled=bool(debug_enabled), redact_media=bool(debug_redact_media))
     if debug_conf.enabled:
         try:
             # Build full request for debug dump
@@ -672,6 +673,7 @@ async def generate_oci_stream(
     cohere_messages=None,
     *,
     debug_enabled: bool = False,
+    debug_redact_media: bool = True,
     trace_ctx: Optional[dict] = None,
 ):
     """
@@ -849,7 +851,7 @@ RULE: When using tools, output ONLY the <TOOL_CALL> block(s). No other text!"""
     if genai_client is None:
         raise ValueError("genai_client cannot be None")
 
-    debug_conf = DebugDumpConfig(enabled=bool(debug_enabled))
+    debug_conf = DebugDumpConfig(enabled=bool(debug_enabled), redact_media=bool(debug_redact_media))
     if debug_conf.enabled:
         try:
             # Build full request for debug dump

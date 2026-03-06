@@ -9,49 +9,64 @@
   "model_definitions": {
     "xai.grok-4-fast-non-reasoning": {
       "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.your-model-ocid",
+      "model_types": ["text"],
       "max_tokens_key": "max_tokens",
       "temperature": 0.7
     },
     "xai.grok-4-fast-reasoning": {
       "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.your-model-ocid",
+      "model_types": ["text"],
       "max_tokens_key": "max_tokens",
       "temperature": 0.7
     },
     "xai.grok-code-fast-1": {
       "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.your-model-ocid",
+      "model_types": ["text"],
       "max_tokens_key": "max_tokens",
       "temperature": 0.7
     },
     "openai.gpt-oss-20b": {
       "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.your-model-ocid",
+      "model_types": ["text"],
       "max_tokens_key": "max_completion_tokens",
       "temperature": 0.7
     },
     "openai.gpt-oss-120b": {
       "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.your-model-ocid",
+      "model_types": ["text"],
       "max_tokens_key": "max_completion_tokens",
       "temperature": 0.7
     },
     "openai.gpt-5": {
       "ocid": "ocid1.generativeaimodel.oc1.us-chicago-1.your-model-ocid",
+      "model_types": ["text"],
       "max_tokens_key": "max_completion_tokens",
       "temperature": 1.0
     },
     "cohere.command-r-plus": {
         "ocid": "ocid1.generativeaimodel.oc1...",
+        "model_types": ["text"],
         "api_format": "cohere",
         "max_tokens_key": "max_tokens",
         "temperature": 0.7
-      },
-      "cohere.command-r": {
+    },
+    "cohere.command-r": {
         "ocid": "ocid1.generativeaimodel.oc1...",
+        "model_types": ["text"],
         "api_format": "cohere",
         "max_tokens_key": "max_tokens",
         "temperature": 0.7
-      }
+    },
+    "google.gemini-2.5-pro": {
+      "ocid": "ocid1.generativeaimodel.oc1...",
+      "model_types": ["text", "images", "video"],
+      "max_tokens_key": "max_completion_tokens",
+      "temperature": 1.0
+    }
   },
   "default_model": "openai.gpt-oss-20b",
   "debug": false,
+  "debug_redact_media": true,
   "enable_nl_tool_fallback": false,
   "messages_max_items": 200,
   "rate_limit": {

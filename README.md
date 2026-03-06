@@ -535,6 +535,11 @@ Emits Anthropic-compatible SSE events:
 }
 ```
 
+Notes:
+- The selected model must include `"images"` in `model_definitions.<model>.model_types`.
+- Image input currently supports `source.type: "base64"` only (`url` is rejected).
+- `video` and `audio` blocks are validated but not converted by the gateway yet (text/image are currently supported paths).
+
 #### 4. Extended Thinking
 
 ```json
@@ -968,6 +973,7 @@ if __name__ == "__main__":
 - `docker-oci/` is in `.gitignore` - never commit OCI credentials
 - Use OCI IAM policies to restrict model access
 - Use `debug_ui.auth_mode: "bearer"` with `DEBUG_UI_AUTH_TOKEN` in `.env`, or `auth_mode: "basic"` with `DEBUG_UI_BASIC_USER`/`DEBUG_UI_BASIC_PASSWORD`
+- Keep `debug` disabled in production. If enabled, keep `debug_redact_media: true` to redact media payloads in dumps.
 - **Docker images contain no credentials** - they are injected at runtime
 - For OKE, prefer Workload Identity over API keys
 - Monitor token usage and costs

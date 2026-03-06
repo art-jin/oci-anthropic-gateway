@@ -73,11 +73,7 @@ def convert_content_to_oci(content: Union[str, List[dict]]) -> Union[str, List]:
                     text_parts.append("[IMAGE: Failed to process]")
 
             elif source_type == "url":
-                # Handle image URL - OCI may not support direct URLs
-                # For now, note this limitation
-                url = source.get("url", "")
-                logger.warning(f"Image URL not directly supported by OCI: {url}")
-                text_parts.append(f"[IMAGE: {url}]")
+                raise ValueError("Image URL source is not supported by this gateway; use base64 source.type")
             else:
                 logger.warning(f"Unknown image source type: {source_type}")
                 text_parts.append("[IMAGE: Unknown format]")

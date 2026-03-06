@@ -5,7 +5,7 @@ import logging
 import os
 import oci
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from ..utils.constants import DEFAULT_MAX_TOKENS
 
@@ -16,6 +16,7 @@ logger = logging.getLogger("oci-gateway")
 
 class Config:
     """Configuration manager for OCI Anthropic Gateway."""
+    ALLOWED_MODEL_TYPES = {"text", "images", "video", "audio"}
 
     def __init__(self, config_file: str = "config.json"):
         """Initialize configuration from file.
@@ -41,6 +42,7 @@ class Config:
         self.debug_ui_auth_basic_user: str = ""
         self.debug_ui_auth_basic_password: str = ""
         self.debug_ui_max_detail_bytes: int = 2_000_000
+        self.debug_redact_media: bool = True
         self.enable_nl_tool_fallback: bool = False
         self.messages_max_items: int = 200
         self.rate_limit_enabled: bool = False
@@ -79,6 +81,7 @@ class Config:
             self.debug_ui_auth_basic_user = str(os.getenv("DEBUG_UI_BASIC_USER", "")).strip()
             self.debug_ui_auth_basic_password = str(os.getenv("DEBUG_UI_BASIC_PASSWORD", "")).strip()
             self.debug_ui_max_detail_bytes = int(debug_ui.get("max_detail_bytes", 2_000_000))
+            self.debug_redact_media = bool(custom_config.get("debug_redact_media", True))
             self.enable_nl_tool_fallback = bool(custom_config.get("enable_nl_tool_fallback", False))
             self.messages_max_items = int(custom_config.get("messages_max_items", 200))
 
@@ -136,11 +139,11 @@ class Config:
 
             # Normalize default model config so call sites can always rely on
             # compartment_id and common defaults being present.
-            self.default_model_conf = self._normalize_model_conf(self.default_model_conf)
+            self.default_model_conf = self._normalize_model_conf(self.default_model_conf, self.default_model_name)
 
             # Validate model definitions at startup to surface configuration issues early.
             for model_name, model_conf in self.model_definitions.items():
-                normalized = self._normalize_model_conf(model_conf)
+                normalized = self._normalize_model_conf(model_conf, model_name)
                 # Persist normalized config to keep runtime behavior consistent.
                 self.model_definitions[model_name] = normalized
                 if not normalized.get("compartment_id"):
@@ -235,13 +238,45 @@ class Config:
 
         return dict(self.default_model_conf)
 
-    def _normalize_model_conf(self, model_conf: Dict[str, Any]) -> Dict[str, Any]:
+    @classmethod
+    def _normalize_model_types(cls, model_types: Any, model_name: str) -> List[str]:
+        """Normalize and validate model_types for one model config."""
+        if model_types is None:
+            return ["text"]
+
+        if not isinstance(model_types, list):
+            raise ValueError(f"Invalid model_types for model '{model_name}' (must be an array)")
+
+        normalized_types: List[str] = []
+        seen = set()
+        for i, item in enumerate(model_types):
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError(
+                    f"Invalid model_types[{i}] for model '{model_name}' (must be a non-empty string)"
+                )
+            t = item.strip().lower()
+            if t not in cls.ALLOWED_MODEL_TYPES:
+                allowed = ",".join(sorted(cls.ALLOWED_MODEL_TYPES))
+                raise ValueError(
+                    f"Invalid model_types value '{item}' for model '{model_name}' (allowed: {allowed})"
+                )
+            if t not in seen:
+                seen.add(t)
+                normalized_types.append(t)
+
+        if not normalized_types:
+            raise ValueError(f"Invalid model_types for model '{model_name}' (must not be empty)")
+
+        return normalized_types
+
+    def _normalize_model_conf(self, model_conf: Dict[str, Any], model_name: str = "") -> Dict[str, Any]:
         """Return a normalized model config with global fallbacks applied."""
         normalized = dict(model_conf or {})
         if not normalized.get("compartment_id"):
             normalized["compartment_id"] = self.compartment_id
         if not normalized.get("max_tokens_key"):
             normalized["max_tokens_key"] = "max_tokens"
+        normalized["model_types"] = self._normalize_model_types(normalized.get("model_types"), model_name or "unknown")
         return normalized
 
 

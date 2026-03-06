@@ -12,7 +12,13 @@ from ..utils.content_converter import (
     convert_content_to_oci,
     convert_anthropic_messages_to_cohere,
 )
-from ..utils.request_validation import validate_count_tokens_payload, validate_messages_payload
+from ..utils.request_validation import (
+    validate_count_tokens_payload,
+    validate_messages_payload,
+    validate_system_payload,
+    collect_requested_modalities,
+    validate_model_modalities,
+)
 
 logger = logging.getLogger("oci-gateway")
 
@@ -97,6 +103,18 @@ async def handle_messages_request(
                 },
             },
         )
+    system_validation_err = validate_system_payload(body.get("system"))
+    if system_validation_err:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": system_validation_err,
+                },
+            },
+        )
 
     if not isinstance(request_metadata, dict):
         request_metadata = {}
@@ -125,6 +143,21 @@ async def handle_messages_request(
     model_conf = app_config.get_model_config(req_model)
     api_format = model_conf.get("api_format", "generic").lower()
     is_cohere = api_format == "cohere"
+    model_types = model_conf.get("model_types", ["text"])
+
+    requested_modalities = collect_requested_modalities(body.get("messages", []), body.get("system"))
+    modalities_err = validate_model_modalities(requested_modalities, model_types, is_cohere=is_cohere)
+    if modalities_err:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": modalities_err,
+                },
+            },
+        )
 
     # Convert messages to OCI format
     oci_msgs = []
@@ -145,7 +178,7 @@ async def handle_messages_request(
 
             system_text = ""
             for block in system_prompt:
-                if block.get("type") == "text":
+                if isinstance(block, dict) and block.get("type") == "text":
                     system_text += block.get("text", "")
         else:
             system_text = str(system_prompt)
@@ -172,7 +205,19 @@ async def handle_messages_request(
         cache_info = extract_cache_control(content) if isinstance(content, list) else {"has_cache_control": False, "cached_blocks": 0, "cache_types": []}
 
         # Use the convert_content_to_oci function to handle text, images, tool_use, and tool_result
-        converted_content = convert_content_to_oci(m["content"])
+        try:
+            converted_content = convert_content_to_oci(m["content"])
+        except ValueError as e:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": str(e),
+                    },
+                },
+            )
 
         # Check if the result is a list (multimodal with images) or string (text only)
         if isinstance(converted_content, list):
@@ -228,6 +273,7 @@ async def handle_messages_request(
                 app_config.genai_client,
                 cohere_messages,
                 debug_enabled=bool(app_config.debug),
+                debug_redact_media=bool(getattr(app_config, "debug_redact_media", True)),
                 trace_ctx=trace_ctx,
             ),
             media_type="text/event-stream",
@@ -248,6 +294,7 @@ async def handle_messages_request(
             app_config.genai_client,
             cohere_messages,
             debug_enabled=bool(app_config.debug),
+            debug_redact_media=bool(getattr(app_config, "debug_redact_media", True)),
             trace_ctx=trace_ctx,
         )
 

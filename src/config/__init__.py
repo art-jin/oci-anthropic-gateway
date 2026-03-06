@@ -174,17 +174,27 @@ class Config:
         """Initialize OCI GenAI client with multiple authentication methods.
 
         Authentication priority:
-        1. OCI_RESOURCE_PRINCIPAL_VERSION env var -> Resource Principal (OKE/Functions)
-        2. ~/.oci/config file -> API Key authentication (local development)
+        1. OKE Workload Identity signer
+        2. OCI Resource Principal signer
+        3. ~/.oci/config API Key (local fallback)
         """
         try:
-            # Check for Resource Principal / Workload Identity
-            rp_version = os.environ.get("OCI_RESOURCE_PRINCIPAL_VERSION", "")
+            signer = None
 
-            if rp_version:
-                # Use Resource Principal (for OKE Workload Identity, Functions, Instance Principal)
-                logger.info("Using OCI Resource Principal authentication")
-                signer = oci.auth.signers.get_resource_principals_signer()
+            try:
+                logger.info("Trying OKE Workload Identity authentication")
+                signer = oci.auth.signers.get_oke_workload_identity_resource_principal_signer()
+                logger.info("Using OKE Workload Identity authentication")
+            except Exception as oke_e:
+                logger.info(f"OKE Workload Identity unavailable: {oke_e}")
+
+            if signer is None:
+                rp_version = os.environ.get("OCI_RESOURCE_PRINCIPAL_VERSION", "")
+                if rp_version:
+                    logger.info("Using OCI Resource Principal authentication")
+                    signer = oci.auth.signers.get_resource_principals_signer()
+
+            if signer is not None:
                 self.genai_client = oci.generative_ai_inference.GenerativeAiInferenceClient(
                     config={},
                     signer=signer,
@@ -193,7 +203,6 @@ class Config:
                     timeout=(10, 360)
                 )
             else:
-                # Fallback to API Key authentication (local development)
                 logger.info("Using OCI API Key authentication from ~/.oci/config")
                 sdk_config = oci.config.from_file('~/.oci/config', "DEFAULT")
                 self.genai_client = oci.generative_ai_inference.GenerativeAiInferenceClient(

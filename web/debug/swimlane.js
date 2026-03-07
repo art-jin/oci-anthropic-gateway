@@ -280,16 +280,6 @@ class SwimlaneTimeline {
     // Avoid duplicates
     if (this.events.find(e => e.id === event.id)) return;
 
-    // Debug: log lane values for request events
-    if (event.kind === 'request_summary') {
-      console.log('[DEBUG] request_summary event:', {
-        lane: event.lane,
-        target_lane: event.target_lane,
-        laneX: this.getLaneX(event.lane),
-        targetX: event.target_lane ? this.getLaneX(event.target_lane) : null
-      });
-    }
-
     // Add to events list and sort by timestamp
     this.events.push(event);
     this.events.sort((a, b) => {
@@ -407,24 +397,12 @@ class SwimlaneTimeline {
       const sourceR = this.nodeRadius * 0.78;
       const targetR = sourceR * 1.18;
 
-      const x1 = laneX + dir * sourceR;
-      const x2 = targetX - dir * targetR;
-
-      // Debug: log arrow coordinates
-      console.log('[DEBUG] Drawing arrow for', event.kind, ':', {
-        x1: Math.round(x1),
-        x2: Math.round(x2),
-        y: Math.round(y),
-        laneX: Math.round(laneX),
-        targetX: Math.round(targetX)
-      });
-
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
       line.classList.add('connector');
 
-      line.setAttribute('x1', x1);
+      line.setAttribute('x1', laneX + dir * sourceR);
       line.setAttribute('y1', y);
-      line.setAttribute('x2', x2);
+      line.setAttribute('x2', targetX - dir * targetR);
       line.setAttribute('y2', y);  // Horizontal line (same y)
       line.style.stroke = sessionColor;
       line.setAttribute('marker-end', `url(#${this.getArrowMarkerId(sessionColor)})`);
@@ -523,17 +501,6 @@ class SwimlaneTimeline {
   appendEventNode(event) {
     const index = this.events.length - 1;
     const y = this.calculateY(index);
-
-    // Debug: log laneWidth and calculated positions
-    console.log('[DEBUG] appendEventNode:', {
-      kind: event.kind,
-      lane: event.lane,
-      target_lane: event.target_lane,
-      laneWidth: this.laneWidth,
-      containerWidth: this.container.clientWidth,
-      laneX: this.getLaneX(event.lane),
-      targetX: event.target_lane ? this.getLaneX(event.target_lane) : null
-    });
 
     // Extend SVG height if needed
     const currentHeight = parseInt(this.svg.getAttribute('height')) || 0;

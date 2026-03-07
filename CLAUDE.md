@@ -311,6 +311,46 @@ oci==2.131.1
 
 ## Changelog
 
+### 2026-03-07: Debug UI Bug Fixes
+
+**Bug Fix 1: Clear Button Not Working**
+
+**Problem:** The Clear button in the debug swimlane UI did not actually clear data. The frontend sent a GET request instead of DELETE.
+
+**Root Cause:** `web/debug/common.js` `api()` function only accepted `path` parameter, ignoring the second `options` parameter. When `api('/clear', { method: 'DELETE' })` was called, the `{ method: 'DELETE' }` was silently dropped.
+
+**Fix:**
+- Updated `api(path, options = {})` to accept and pass through fetch options
+- Added support for `method`, `headers`, and other fetch options
+- Handle empty responses (204, content-length: 0)
+
+**Files Changed:**
+- `web/debug/common.js` - Added `options` parameter to `api()` function
+
+---
+
+**Bug Fix 2: Swimlane Event Order Incorrect**
+
+**Problem:** In real-time SSE updates, events appeared in wrong order. For example, `oci_request` (gateway→oci) appeared on row 1, while `request_summary` (client→gateway) appeared on row 2. This made arrows look like they started from the middle instead of the left.
+
+**Root Cause:** SSE events were appended to the events array in arrival order, not timestamp order. Since dump files are indexed in quick succession, the arrival order may differ from the actual chronological order.
+
+**Fix:**
+- Sort events by `ts` timestamp after adding new SSE event
+- Re-render all events (instead of incremental append) to ensure correct positioning
+
+**Files Changed:**
+- `web/debug/swimlane.js` - Modified `onNewEvent()` to sort by timestamp and re-render
+
+**Visual Result:**
+```
+Row 1: request_summary    (client → gateway)   ✓ Correct order
+Row 2: oci_request        (gateway → oci)
+Row 3: oci_response       (oci → gateway)
+Row 4: tool_detection     (internal, no arrow)
+Row 5: final_response     (gateway → client)
+```
+
 ### 2026-03-05: Docker & Kubernetes Deployment Support
 
 **New Feature:** Containerized deployment with multiple authentication methods.

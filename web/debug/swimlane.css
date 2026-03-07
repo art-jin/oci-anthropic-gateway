@@ -219,6 +219,28 @@
 .status-dot.connecting { color: #f59e0b; animation: blink 1s infinite; }
 .status-dot.disconnected { color: #ef4444; }
 
+/* Clear Button */
+.clear-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b42318;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.clear-btn:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+
+.clear-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }

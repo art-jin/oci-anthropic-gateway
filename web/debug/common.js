@@ -209,13 +209,13 @@ function installDebugAuthToolbar() {
   refreshStatus();
 }
 
-async function api(path) {
+async function api(path, options = {}) {
   const doFetch = async (token) => {
-    const headers = {};
+    const headers = { ...(options.headers || {}) };
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
-    return fetch(`/debug/api${path}`, { headers });
+    return fetch(`/debug/api${path}`, { ...options, headers });
   };
 
   let token = ensureDebugAuthToken();
@@ -234,6 +234,11 @@ async function api(path) {
   if (!r.ok) {
     const text = await r.text();
     throw new Error(`HTTP ${r.status}: ${text}`);
+  }
+  // Handle empty response for DELETE requests
+  const contentLength = r.headers.get('content-length');
+  if (contentLength === '0' || r.status === 204) {
+    return null;
   }
   return r.json();
 }

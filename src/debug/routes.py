@@ -285,5 +285,18 @@ def broadcast_session_event(session_id: str, event: dict) -> None:
         except asyncio.QueueFull:
             logger.warning("Global SSE queue full, dropping event")
 
-    if count > 0:
-        logger.debug("Broadcast event to %d subscribers for session=%s", count, session_id)
+        if count > 0:
+            logger.debug("Broadcast event to %d subscribers for session=%s", count, session_id)
+
+
+@debug_router.delete("/clear")
+def clear_all_data(request: Request):
+    """Clear all debug data from database and delete dump files.
+
+    This is a destructive operation that cannot be undone.
+    """
+    _enforce_auth(request)
+    repo = _ensure_enabled()
+    result = repo.clear_all_data()
+    logger.info("Cleared all debug data: %s", result)
+    return {"success": True, "result": result}

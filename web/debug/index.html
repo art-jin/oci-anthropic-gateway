@@ -15,6 +15,7 @@
       <span id="connectionText">Connecting...</span>
       <span id="eventCount">0 events</span>
       <span id="statusBar"></span>
+      <button id="clearBtn" class="clear-btn" title="Clear all debug data">Clear</button>
       <a href="/debug/sessions.html">Session List</a>
     </div>
   </div>
@@ -31,8 +32,8 @@
     </div>
   </div>
 
-  <script src="/debug/common.js?v=20260305-authfix2"></script>
-  <script src="/debug/swimlane.js?v=20260305-authfix2"></script>
+  <script src="/debug/common.js?v=20260307-lanefix3"></script>
+  <script src="/debug/swimlane.js?v=20260307-lanefix3"></script>
   <script>
     // Initialize global swimlane timeline (all sessions)
     const timeline = new SwimlaneTimeline(
@@ -94,6 +95,30 @@
       if (e.key === 'Escape') {
         timeline.selectedEventId = null;
         document.querySelectorAll('.event-node.selected').forEach(el => el.classList.remove('selected'));
+      }
+    });
+
+    // Clear button handler
+    document.getElementById('clearBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('clearBtn');
+      if (btn.disabled) return;
+
+      if (!confirm('Clear all debug data? This cannot be undone.')) {
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Clearing...';
+
+      try {
+        await timeline.clearAll();
+        document.getElementById('statusBar').textContent = 'Cleared all data';
+      } catch (err) {
+        console.error('Failed to clear data:', err);
+        document.getElementById('statusBar').textContent = `Error: ${err.message}`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Clear';
       }
     });
   </script>

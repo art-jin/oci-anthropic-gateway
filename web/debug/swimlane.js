@@ -44,6 +44,9 @@ class SwimlaneTimeline {
     ];
     this.sessionColorMap = {};
     this.markerColorMap = {};
+
+    // ResizeObserver for container size changes
+    this.resizeObserver = null;
   }
 
   /**
@@ -92,6 +95,49 @@ class SwimlaneTimeline {
 
     // Handle window resize
     window.addEventListener('resize', () => this.handleResize());
+
+    // Setup ResizeObserver to handle container size changes
+    this.setupResizeObserver();
+  }
+
+  /**
+   * Setup ResizeObserver to monitor container size changes
+   * and re-render when width becomes valid or changes significantly
+   */
+  setupResizeObserver() {
+    if (typeof ResizeObserver === 'undefined') {
+      // Fallback for browsers without ResizeObserver support
+      return;
+    }
+
+    this.resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const newWidth = entry.contentRect?.width || this.container.clientWidth;
+
+        // Only react to valid width changes
+        if (newWidth > 0) {
+          const widthChanged = this.laneWidth !== newWidth;
+          const wasInvalid = !this.laneWidth || this.laneWidth <= 0;
+
+          if (widthChanged || wasInvalid) {
+            const oldWidth = this.laneWidth;
+            this.laneWidth = newWidth;
+
+            // Re-render if we have events and width was previously invalid or changed
+            if (this.events.length > 0) {
+              console.log('ResizeObserver: re-rendering with new width', {
+                oldWidth: oldWidth,
+                newWidth: newWidth,
+                wasInvalid: wasInvalid
+              });
+              this.render();
+            }
+          }
+        }
+      }
+    });
+
+    this.resizeObserver.observe(this.container);
   }
 
   /**
@@ -234,12 +280,28 @@ class SwimlaneTimeline {
     // Avoid duplicates
     if (this.events.find(e => e.id === event.id)) return;
 
-    // Add to events list
+    // Debug: log lane values for request events
+    if (event.kind === 'request_summary') {
+      console.log('[DEBUG] request_summary event:', {
+        lane: event.lane,
+        target_lane: event.target_lane,
+        laneX: this.getLaneX(event.lane),
+        targetX: event.target_lane ? this.getLaneX(event.target_lane) : null
+      });
+    }
+
+    // Add to events list and sort by timestamp
     this.events.push(event);
+    this.events.sort((a, b) => {
+      // Sort by timestamp ascending
+      const tsA = a.ts || '';
+      const tsB = b.ts || '';
+      return tsA.localeCompare(tsB);
+    });
     this.updateEventCount();
 
-    // Incrementally render new event
-    this.appendEventNode(event);
+    // Re-render all events to ensure correct order
+    this.render();
 
     // Auto-scroll if enabled
     if (this.autoScroll) {
@@ -345,12 +407,24 @@ class SwimlaneTimeline {
       const sourceR = this.nodeRadius * 0.78;
       const targetR = sourceR * 1.18;
 
+      const x1 = laneX + dir * sourceR;
+      const x2 = targetX - dir * targetR;
+
+      // Debug: log arrow coordinates
+      console.log('[DEBUG] Drawing arrow for', event.kind, ':', {
+        x1: Math.round(x1),
+        x2: Math.round(x2),
+        y: Math.round(y),
+        laneX: Math.round(laneX),
+        targetX: Math.round(targetX)
+      });
+
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
       line.classList.add('connector');
 
-      line.setAttribute('x1', laneX + dir * sourceR);
+      line.setAttribute('x1', x1);
       line.setAttribute('y1', y);
-      line.setAttribute('x2', targetX - dir * targetR);
+      line.setAttribute('x2', x2);
       line.setAttribute('y2', y);  // Horizontal line (same y)
       line.style.stroke = sessionColor;
       line.setAttribute('marker-end', `url(#${this.getArrowMarkerId(sessionColor)})`);
@@ -449,6 +523,17 @@ class SwimlaneTimeline {
   appendEventNode(event) {
     const index = this.events.length - 1;
     const y = this.calculateY(index);
+
+    // Debug: log laneWidth and calculated positions
+    console.log('[DEBUG] appendEventNode:', {
+      kind: event.kind,
+      lane: event.lane,
+      target_lane: event.target_lane,
+      laneWidth: this.laneWidth,
+      containerWidth: this.container.clientWidth,
+      laneX: this.getLaneX(event.lane),
+      targetX: event.target_lane ? this.getLaneX(event.target_lane) : null
+    });
 
     // Extend SVG height if needed
     const currentHeight = parseInt(this.svg.getAttribute('height')) || 0;
@@ -943,7 +1028,38 @@ class SwimlaneTimeline {
       this.eventSource.close();
       this.eventSource = null;
     }
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
     this.hideTooltip();
+  }
+
+  /**
+   * Clear all debug data (frontend + backend)
+   * Calls backend API to clear database and dump files,
+   * then resets frontend state.
+   */
+  async clearAll() {
+    // Call backend API to clear all data
+    await api('/clear', { method: 'DELETE' });
+
+    // Clear frontend state
+    this.events = [];
+    this.sessionColorMap = {};
+    this.markerColorMap = {};
+    this.selectedEventId = null;
+
+    // Clear detail panel
+    this.detailPanel.innerHTML = '<div class="placeholder">Click an event node to view details</div>';
+
+    // Re-render empty state
+    this.showEmpty();
+
+    // Update event count
+    this.updateEventCount();
+
+    console.log('Cleared all debug data');
   }
 
   // Helper methods

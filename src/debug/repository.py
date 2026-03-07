@@ -538,3 +538,56 @@ class DebugRepository:
             "events": events,
             "total": len(events),
         }
+
+    def clear_all_data(self) -> Dict[str, Any]:
+        """Clear all debug data from database and optionally delete dump files.
+
+        Returns summary of deleted counts.
+        """
+        import shutil
+
+        with self._connect() as conn:
+            # Get dump file paths before deleting
+            dump_rows = conn.execute("SELECT file_path FROM dumps").fetchall()
+            session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            message_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            dump_count = conn.execute("SELECT COUNT(*) FROM dumps").fetchone()[0]
+
+            # Delete all data from tables
+            conn.execute("DELETE FROM tool_calls")
+            conn.execute("DELETE FROM dumps")
+            conn.execute("DELETE FROM messages")
+            conn.execute("DELETE FROM sessions")
+            conn.commit()
+
+        # Delete dump files
+        deleted_files = 0
+        failed_files = 0
+        for row in dump_rows:
+            try:
+                Path(row["file_path"]).unlink()
+                deleted_files += 1
+            except Exception:
+                failed_files += 1
+
+        # Try to remove the dump directory if empty
+        dump_dir = Path(self.db_path).parent
+        if dump_dir.exists():
+            try:
+                # Remove all remaining json files in the directory
+                for f in dump_dir.glob("*.json"):
+                    try:
+                        f.unlink()
+                        deleted_files += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        return {
+            "deleted_sessions": session_count,
+            "deleted_messages": message_count,
+            "deleted_dumps": dump_count,
+            "deleted_files": deleted_files,
+            "failed_files": failed_files,
+        }

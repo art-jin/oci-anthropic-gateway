@@ -1,0 +1,9 @@
+Generative AI Service Inference API
+https://docs.oracle.com/en-us/iaas/api/#/en/generative-ai-inference/20231130/
+
+ApplyGuardrails
+https://docs.oracle.com/en-us/iaas/api/#/en/generative-ai-inference/20231130/ApplyGuardrailsResult/ApplyGuardrails
+
+GuardrailsResults Reference
+https://docs.oracle.com/en-us/iaas/api/#/en/generative-ai-inference/20231130/datatypes/GuardrailsResults
+

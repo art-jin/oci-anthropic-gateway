@@ -19,11 +19,29 @@ from ..utils.request_validation import (
     collect_requested_modalities,
     validate_model_modalities,
 )
+from ..utils.guardrails import (
+    apply_input_guardrails,
+    collect_input_text_for_guardrails,
+    summarize_guardrails_result,
+)
 
 logger = logging.getLogger("oci-gateway")
 
 # Import the generation functions from services
 from ..services.generation import generate_oci_non_stream, generate_oci_stream
+
+
+def _guardrails_error_response(message: str, status_code: int = 400) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+            },
+        },
+    )
 
 
 async def handle_count_tokens(body: dict) -> JSONResponse:
@@ -144,6 +162,7 @@ async def handle_messages_request(
     api_format = model_conf.get("api_format", "generic").lower()
     is_cohere = api_format == "cohere"
     model_types = model_conf.get("model_types", ["text"])
+    guardrails_config = getattr(app_config, "guardrails", None)
 
     requested_modalities = collect_requested_modalities(body.get("messages", []), body.get("system"))
     modalities_err = validate_model_modalities(requested_modalities, model_types, is_cohere=is_cohere)
@@ -158,6 +177,41 @@ async def handle_messages_request(
                 },
             },
         )
+
+    if guardrails_config and guardrails_config.enabled and guardrails_config.input.enabled:
+        input_text = collect_input_text_for_guardrails(body, guardrails_config)
+        if input_text:
+            try:
+                input_result = await apply_input_guardrails(
+                    client=app_config.genai_client,
+                    compartment_id=model_conf.get("compartment_id", ""),
+                    content=input_text,
+                    config=guardrails_config,
+                )
+                if input_result.issue_detected:
+                    summary = summarize_guardrails_result(
+                        input_result,
+                        redact_logs=guardrails_config.redact_logs,
+                    )
+                    if guardrails_config.log_details:
+                        logger.warning("Input guardrails issue detected: %s", summary)
+                    else:
+                        logger.warning(
+                            "Input guardrails issue detected: reason=%s",
+                            input_result.blocked_reason or "unspecified",
+                        )
+                    if guardrails_config.mode == "block":
+                        return _guardrails_error_response(
+                            guardrails_config.block_message,
+                            status_code=guardrails_config.block_http_status,
+                        )
+            except Exception:
+                logger.exception("Input guardrails execution failed")
+                if guardrails_config.input.fail_mode == "closed":
+                    return _guardrails_error_response(
+                        guardrails_config.block_message,
+                        status_code=guardrails_config.block_http_status,
+                    )
 
     # Convert messages to OCI format
     oci_msgs = []
@@ -259,10 +313,29 @@ async def handle_messages_request(
 
     # Add tools to parameters if present
     params_with_tools = _prepare_tools_params(body, is_cohere, oci_msgs, app_config)
+    effective_stream = bool(body.get("stream", False))
+
+    if (
+        effective_stream
+        and guardrails_config
+        and guardrails_config.enabled
+        and guardrails_config.output.enabled
+    ):
+        if guardrails_config.streaming_behavior == "reject":
+            return _guardrails_error_response(
+                "Streaming responses are not supported while output guardrails are enabled.",
+                status_code=400,
+            )
+        logger.warning("Downgrading stream=true request to non-stream because output guardrails are enabled")
+        effective_stream = False
+        body["stream"] = False
+        params_with_tools["stream"] = False
+        if isinstance(params_with_tools.get("metadata"), dict):
+            params_with_tools["metadata"]["guardrails_stream_downgraded"] = True
 
     # Generate response
     logger.debug(f"About to call generation with genai_client={app_config.genai_client is not None}")
-    if body.get("stream", False):
+    if effective_stream:
         return StreamingResponse(
             generate_oci_stream(
                 oci_msgs,
@@ -296,6 +369,7 @@ async def handle_messages_request(
             debug_enabled=bool(app_config.debug),
             debug_redact_media=bool(getattr(app_config, "debug_redact_media", True)),
             trace_ctx=trace_ctx,
+            guardrails_config=guardrails_config,
         )
 
 

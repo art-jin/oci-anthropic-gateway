@@ -1,1330 +1,733 @@
-# OCI-Anthropic Gateway Guardrails 集成计划
+# OCI-Anthropic Gateway Guardrails 集成执行计划
 
 ## 文档版本
-- **日期**: 2026-03-11
-- **状态**: 待审批
-- **目标**: 集成 OCI Guardrails API，支持 Input/Output 内容审核
+- 日期: 2026-03-12
+- 状态: Revised for execution
+- 目标: 在不破坏现有 Anthropic 兼容接口的前提下，为网关增加 OCI GenAI Guardrails 能力
 
 ---
 
-## 一、文件变更概览
+## 一、目标与范围
 
-### 新建文件（6 个）
+### 1.1 本次版本目标
 
-| 文件路径 | 用途 |
-|----------|------|
-| `src/utils/guardrails.py` | Guardrails 核心逻辑模块 |
-| `guardrails/blocklist.txt` | 过滤词列表 |
-| `guardrails/blocklist.txt.template` | 过滤词列表模板 |
-| `guardrails/pii_config.json` | PII 检测配置 |
-| `guardrails/pii_config.json.template` | PII 配置模板 |
-| `tests/test_guardrails.py` | 单元测试 |
+本次集成以"可落地、可验证、最小破坏"为原则，分阶段为网关增加以下能力：
 
-### 修改文件（4 个）
+1. Input Guardrails
+   - 对进入 OCI 推理前的文本内容执行 Guardrails 检查
+   - 支持 Content Moderation
+   - 支持 Prompt Injection
+   - 支持 PII 检测
+   - 可选支持本地 blocklist 补充检查
 
-| 文件路径 | 修改类型 |
-|----------|----------|
-| `config.json.template` | 新增 guardrails 配置节 |
-| `src/config/__init__.py` | 解析 guardrails 配置，新增 GuardrailsConfig 类 |
-| `src/routes/handlers.py` | 集成 Guardrails 检查到请求流程 |
-| `.gitignore` | 忽略 `guardrails/blocklist.txt` 和 `guardrails/pii_config.json` |
+2. Output Guardrails
+   - 对 OCI 非流式响应文本执行 Guardrails 检查
+   - 支持 Content Moderation
+   - 支持 PII 检测
+   - 支持对文本输出做 redact/mask
+
+3. 运行模式
+   - `block`: 命中策略时拦截输入，或阻断/替换输出
+   - `inform`: 仅记录命中结果，不拦截
+
+### 1.2 本次版本明确不做
+
+以下内容不在 v1 范围内，避免把计划做成不可执行的大而全：
+
+1. 不做图片/视频内容的 Guardrails 审核
+   - 当前只对文本片段做检查
+   - 多模态消息中的图片/视频内容不进入 Guardrails API
+
+2. 不做真正的实时流式 Output Guardrails 拦截
+   - 实时 SSE 一旦发送给客户端就无法撤回
+   - v1 不实现"先发文本、结束后再告警"这种伪保护方案
+
+3. 不做热重载
+   - blocklist / pii 配置在进程启动时加载
+
+4. 不做 Prometheus 指标与审计系统对接
+   - 先保留结构化日志接口
 
 ---
 
-## 二、详细修改计划
+## 二、基于当前代码的落地点
 
-### 2.1 新建 `config.json.template` 修改
+### 2.1 当前代码结构事实
 
-**位置**: 根目录
-**修改内容**: 在现有配置末尾、`server` 节之前添加 `guardrails` 配置节
+现有项目的请求路径如下：
+
+1. `src/routes/handlers.py`
+   - 负责请求校验
+   - 负责把 Anthropic messages 转成 OCI message
+   - 负责分发到流式或非流式生成
+
+2. `src/services/generation.py`
+   - `generate_oci_non_stream()` 内部直接调用 OCI，并直接组装 Anthropic JSON 响应
+   - `generate_oci_stream()` 内部直接输出 Anthropic SSE 事件流
+
+因此：
+
+1. Input Guardrails 应接在 `handlers.py` 中
+   - 在参数校验通过后
+   - 在调用 OCI 推理前
+
+2. 非流式 Output Guardrails 应接在 `generate_oci_non_stream()` 中
+   - 在拿到 OCI 响应并抽取出 `content_blocks` 后
+   - 在返回 `JSONResponse` 前
+
+3. 流式 Output Guardrails 不能沿用当前即时输出模型做真正拦截
+   - v1 只定义清晰策略，不做半成品实现
+
+### 2.2 关键兼容性约束
+
+本计划执行时必须保证以下行为不被破坏：
+
+1. `guardrails.enabled=false` 时，现有行为完全不变
+2. 非流式接口仍返回 Anthropic 兼容 JSON
+3. 流式接口默认仍返回 Anthropic 兼容 SSE
+4. 工具调用 `tool_use` / `tool_result` 现有行为不被误改
+5. `debug dump` 仍可用，但要补充脱敏策略
+
+---
+
+## 三、v1 策略定义
+
+### 3.1 Input Guardrails 覆盖范围
+
+v1 输入检查对象定义如下：
+
+1. 默认检查 `user` 文本内容
+2. 可选检查 `system` 文本内容
+3. 默认检查 `tool_result` 文本内容
+   - 原因: 当前项目会把 `tool_result` 以文本形式继续送给模型
+   - 这是 prompt injection 的高风险入口，不能漏掉
+
+不进入 v1 检查的内容：
+
+1. image block 的二进制内容
+2. video 内容
+3. 纯结构化的 `tool_use.input` JSON 本身
+
+### 3.2 Output Guardrails 覆盖范围
+
+v1 输出检查对象定义如下：
+
+1. 仅检查 Anthropic 响应中的 `text` content block
+2. 不修改 `tool_use` block
+3. 不修改 `metadata`
+4. 不修改 `usage`
+5. 不修改 `stop_reason`
+
+### 3.3 流式响应策略
+
+v1 对流式响应采用显式限制，而不是勉强支持：
+
+1. Input Guardrails
+   - 完全支持
+
+2. Output Guardrails
+   - `output.enabled=false`: 保持现有实时流式
+   - `output.enabled=true` 且请求 `stream=true`:
+     - 默认返回 400，提示当前配置不支持流式 output guardrails
+     - 或由配置显式允许降级为非流式后再返回
+
+建议 v1 默认采用第一种，逻辑清晰，风险最低。
+
+### 3.4 失败策略
+
+Guardrails API 自身也可能超时或失败，因此必须定义失败策略：
+
+1. `fail_mode = "open"`
+   - Guardrails 调用失败时跳过检查，继续主流程
+   - 适合高可用优先
+
+2. `fail_mode = "closed"`
+   - Guardrails 调用失败时直接拦截请求
+   - 适合合规优先
+
+建议默认值：
+
+1. Input Guardrails: `closed`
+2. Output Guardrails: `open`
+
+原因：
+
+1. 输入侧保护优先级更高
+2. 输出侧若因 Guardrails 故障导致全量失败，业务影响更大
+
+---
+
+## 四、配置设计
+
+### 4.1 `config.json.template` 新增配置节
+
+在现有配置中新增 `guardrails` 节：
 
 ```json
 {
-  ...现有配置...,
-
+  "...": "...",
   "guardrails": {
     "enabled": false,
     "mode": "block",
+    "default_language": "en",
     "config_dir": "guardrails",
+    "block_http_status": 400,
+    "block_message": "Request blocked by guardrails policy.",
+    "streaming_behavior": "reject",
+    "log_details": false,
+    "redact_logs": true,
     "input": {
+      "enabled": true,
+      "fail_mode": "closed",
+      "include_system": false,
+      "include_tool_results": true,
       "content_moderation": {
         "enabled": true,
-        "categories": ["OVERALL", "BLOCKLIST"],
-        "blocklist_file": "blocklist.txt"
+        "categories": ["OVERALL"]
       },
       "prompt_injection": {
         "enabled": true
       },
       "pii": {
         "enabled": false,
-        "config_file": "pii_config.json"
+        "types": ["EMAIL", "PERSON", "TELEPHONE_NUMBER"]
+      },
+      "local_blocklist": {
+        "enabled": false,
+        "file": "blocklist.txt"
       }
     },
     "output": {
       "enabled": false,
+      "fail_mode": "open",
       "content_moderation": {
         "enabled": true,
         "categories": ["OVERALL"]
       },
       "pii": {
         "enabled": false,
-        "config_file": "pii_config.json",
-        "action": "redact"
+        "types": ["EMAIL", "PERSON", "TELEPHONE_NUMBER"],
+        "action": "redact",
+        "placeholder": "[REDACTED]"
       }
-    },
-    "default_language": "en",
-    "block_http_status": 400,
-    "block_message": "Inappropriate content detected. Please revise your request.",
-    "inform_log_level": "warning"
-  },
-
-  "server": {...}
+    }
+  }
 }
 ```
 
-**配置字段说明**:
+### 4.2 配置字段说明
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
+| 字段 | 类型 | 建议默认值 | 说明 |
+|------|------|------------|------|
 | `enabled` | bool | false | Guardrails 总开关 |
-| `mode` | string | "block" | "block" 拦截请求 / "inform" 仅记录日志 |
-| `config_dir` | string | "guardrails" | Guardrails 配置文件目录 |
-| `input` | object | - | 输入检查配置 |
-| `output` | object | - | 输出检查配置 |
-| `default_language` | string | "en" | 默认语言代码 |
-| `block_http_status` | int | 400 | 拦截时返回的 HTTP 状态码 |
-| `block_message` | string | - | 拦截时返回的错误消息 |
-| `inform_log_level` | string | "warning" | inform 模式下的日志级别 |
+| `mode` | string | `block` | `block` / `inform` |
+| `default_language` | string | `en` | 传给 OCI Guardrails 的语言代码 |
+| `config_dir` | string | `guardrails` | 外部模板/文件目录 |
+| `block_http_status` | int | 400 | block 模式拦截时 HTTP 状态 |
+| `block_message` | string | 固定文案 | 返回给客户端的安全文案 |
+| `streaming_behavior` | string | `reject` | `reject` / `downgrade_to_non_stream`，v1 建议只支持 `reject` |
+| `log_details` | bool | false | 是否记录 guardrails 细节 |
+| `redact_logs` | bool | true | 日志中是否脱敏 |
+| `input.enabled` | bool | true | 是否启用输入检查 |
+| `input.fail_mode` | string | `closed` | `open` / `closed` |
+| `input.include_system` | bool | false | 是否检查 system |
+| `input.include_tool_results` | bool | true | 是否检查 tool_result |
+| `output.enabled` | bool | false | 是否启用输出检查 |
+| `output.fail_mode` | string | `open` | `open` / `closed` |
+
+### 4.3 外部配置文件
+
+v1 仅保留一个外部配置文件：
+
+1. `guardrails/blocklist.txt.template`
+   - 用于本地补充 blocklist
+   - 运行时实际文件为 `guardrails/blocklist.txt`
+   - 实际文件不提交仓库
+
+PII 配置不单独放 `pii_config.json`，避免过度设计。v1 直接在 `config.json` 中配置类型列表和动作即可。
+
+### 4.4 路径解析规则
+
+必须明确，避免部署后路径错乱：
+
+1. `config_dir` 相对 `config.json` 所在目录解析
+2. `local_blocklist.file` 相对 `config_dir` 解析
+3. 不依赖进程启动时的 cwd
+
+### 4.5 配置校验规则
+
+启动时应做以下校验：
+
+1. `mode` 只能是 `block` / `inform`
+2. `streaming_behavior` 只能是 `reject` / `downgrade_to_non_stream`
+3. `fail_mode` 只能是 `open` / `closed`
+4. `block_http_status` 必须是合法 HTTP 状态码
+5. `pii.action` 只能是 `redact` / `mask` / `none`
+6. `categories` 必须是数组
+7. 若启用本地 blocklist 且文件不存在：
+   - 记录 warning
+   - 不自动创建目录和文件
+   - 是否启动失败由配置决定，v1 默认不失败
 
 ---
 
-### 2.2 新建 `guardrails/blocklist.txt.template`
+## 五、文件变更计划
 
-**位置**: `guardrails/blocklist.txt.template`
-**内容**:
+### 5.1 新建文件
 
-```
-# OCI Guardrails Blocklist Configuration
-#
-# Format: One word/phrase per line
-# Lines starting with # are comments and will be ignored
-# Empty lines will be ignored
-#
-# Examples:
-# sensitive_word
-# competitor_name
-#
-# Regex support (line starts with "regex:"):
-# regex:\d{4}-\d{4}-\d{4}-\d{4}
-# regex:[A-Z]{2}\d{6}
-#
-# Note: When using BLOCKLIST category in OCI ApplyGuardrails API,
-#       OCI uses its predefined blocklist. This file is for
-#       additional application-level filtering if needed.
+| 文件路径 | 用途 |
+|----------|------|
+| `src/utils/guardrails.py` | Guardrails 核心封装 |
+| `guardrails/blocklist.txt.template` | 本地补充 blocklist 模板 |
+| `test/test_guardrails.py` | Guardrails 单元测试 |
 
-# Add your custom blocklist entries below:
-```
+### 5.2 修改文件
 
----
+| 文件路径 | 修改内容 |
+|----------|----------|
+| `config.json.template` | 新增 `guardrails` 配置节 |
+| `src/config/__init__.py` | 解析并校验 Guardrails 配置 |
+| `src/routes/handlers.py` | 接入 Input Guardrails 与流式限制策略 |
+| `src/services/generation.py` | 接入非流式 Output Guardrails |
+| `.gitignore` | 忽略运行时 blocklist 文件 |
+| `README.md` | 补充配置和行为说明 |
+| `README_CN.md` | 补充中文使用说明 |
 
-### 2.3 新建 `guardrails/pii_config.json.template`
+说明：
 
-**位置**: `guardrails/pii_config.json.template`
-**内容**:
-
-```json
-{
-  "enabled_types": [
-    "PERSON",
-    "EMAIL",
-    "TELEPHONE_NUMBER",
-    "CREDIT_CARD_NUMBER",
-    "IP_ADDRESS",
-    "ADDRESS",
-    "DATE_TIME",
-    "LOCATION"
-  ],
-  "action": "redact",
-  "redaction_placeholder": "[REDACTED]",
-  "confidence_threshold": 0.85,
-  "per_type_overrides": {
-    "EMAIL": {
-      "action": "mask",
-      "mask_char": "*",
-      "preserve_domain": true
-    },
-    "TELEPHONE_NUMBER": {
-      "action": "redact"
-    }
-  }
-}
-```
-
-**配置字段说明**:
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `enabled_types` | array | 要检测的 PII 类型列表 |
-| `action` | string | 默认处理方式: "redact" / "mask" / "none" |
-| `redaction_placeholder` | string | 遮蔽后的占位符 |
-| `confidence_threshold` | float | 置信度阈值 (0.0-1.0) |
-| `per_type_overrides` | object | 按类型覆盖配置 |
+1. 当前仓库测试目录为 `test/`，不是 `tests/`
+2. 本次不新建 `guardrails/pii_config.json.template`
 
 ---
 
-### 2.4 新建 `src/utils/guardrails.py`
+## 六、核心模块设计
 
-**位置**: `src/utils/guardrails.py`
-**职责**: Guardrails 核心逻辑
+### 6.1 新建 `src/utils/guardrails.py`
 
-**模块结构设计**:
+职责：
+
+1. Guardrails 配置数据结构
+2. 文本提取和归并
+3. 调用 OCI `apply_guardrails`
+4. 解析 OCI 返回结果
+5. 本地 blocklist 检查
+6. PII redaction / masking
+7. 统一的结果对象与日志摘要
+
+### 6.2 建议数据结构
+
+建议按当前项目风格实现以下几类对象：
+
+1. `GuardrailsConfig`
+2. `InputGuardrailsConfig`
+3. `OutputGuardrailsConfig`
+4. `LocalBlocklistConfig`
+5. `ContentModerationConfig`
+6. `PromptInjectionConfig`
+7. `PIIConfig`
+8. `GuardrailsCheckResult`
+
+### 6.3 关键函数
+
+建议提供以下函数：
+
+1. `collect_input_text_for_guardrails(body, config) -> str`
+   - 从 Anthropic request body 提取需要检查的文本
+   - 按 `include_system` / `include_tool_results` 决定范围
+
+2. `apply_input_guardrails(...) -> GuardrailsCheckResult`
+   - 执行 input 本地 + OCI 检查
+
+3. `apply_output_guardrails(...) -> GuardrailsCheckResult`
+   - 执行 output OCI 检查
+
+4. `extract_text_blocks(content_blocks) -> str`
+   - 从 Anthropic content blocks 中提取纯文本
+
+5. `replace_text_blocks(content_blocks, new_text) -> list[dict]`
+   - 仅替换 text block，不碰 tool_use block
+
+6. `check_local_blocklist(text, blocklist) -> list[str]`
+
+7. `load_blocklist(path) -> set[str]`
+
+8. `redact_pii_text(text, pii_entities, action, placeholder) -> str`
+
+9. `summarize_guardrails_result(result, redact_logs=True) -> dict`
+   - 供日志和 debug dump 使用
+
+### 6.4 OCI 调用约束
+
+当前 SDK 调用是同步的，不能在 async 路径中直接阻塞 event loop。
+
+因此：
+
+1. `apply_guardrails` 必须通过 `asyncio.to_thread(...)` 执行
+2. 必须传入 `compartment_id`
+3. `compartment_id` 来源应优先使用当前请求最终选中的 model config
+
+### 6.5 OCI 请求构造
+
+根据 demo 和 SDK，本次计划使用：
+
+1. `ApplyGuardrailsDetails`
+2. `GuardrailsTextInput`
+3. `GuardrailConfigs`
+4. `ContentModerationConfiguration`
+5. `PromptInjectionConfiguration`
+6. `PersonallyIdentifiableInformationConfiguration`
+
+---
+
+## 七、配置加载改造计划
+
+### 7.1 修改 `src/config/__init__.py`
+
+新增内容：
+
+1. Guardrails 相关配置属性
+2. Guardrails 配置解析函数
+3. Guardrails 配置校验函数
+4. 相对路径解析逻辑
+
+### 7.2 建议新增属性
 
 ```python
-"""
-Guardrails integration for OCI Anthropic Gateway.
-
-Provides content moderation, prompt injection detection, and PII handling
-using OCI Generative AI ApplyGuardrails API.
-"""
-
-import logging
-import os
-import re
-from dataclasses import dataclass, field
-from enum import Enum
-from pathlib import Path
-from typing import Dict, List, Optional, Set, Any
-
-import oci.generative_ai_inference.models
-
-logger = logging.getLogger("oci-gateway")
-
-
-# === Enums ===
-
-class GuardrailMode(Enum):
-    BLOCK = "block"
-    INFORM = "inform"
-
-
-class PIIAction(Enum):
-    REDACT = "redact"
-    MASK = "mask"
-    NONE = "none"
-
-
-# === Data Classes ===
-
-@dataclass
-class ContentModerationResult:
-    """Content moderation check result."""
-    overall_score: float = 0.0
-    blocklist_score: float = 0.0
-    is_unsafe: bool = False
-    categories: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class PromptInjectionResult:
-    """Prompt injection check result."""
-    score: float = 0.0
-    is_injection: bool = False
-
-
-@dataclass
-class PIIEntity:
-    """Single PII detection entity."""
-    text: str
-    label: str
-    score: float
-    offset: int
-    length: int
-
-
-@dataclass
-class PIIResult:
-    """PII detection result."""
-    entities: List[PIIEntity] = field(default_factory=list)
-    has_pii: bool = False
-
-
-@dataclass
-class GuardrailsCheckResult:
-    """Combined result of all guardrails checks."""
-    passed: bool = True
-    content_moderation: Optional[ContentModerationResult] = None
-    prompt_injection: Optional[PromptInjectionResult] = None
-    pii: Optional[PIIResult] = None
-    blocked_reason: Optional[str] = None
-    redacted_content: Optional[str] = None
-
-
-# === Configuration Classes ===
-
-@dataclass
-class PIITypesConfig:
-    """PII detection configuration."""
-    enabled_types: List[str] = field(default_factory=list)
-    action: str = "redact"
-    redaction_placeholder: str = "[REDACTED]"
-    confidence_threshold: float = 0.85
-    per_type_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-
-
-@dataclass
-class ContentModerationConfig:
-    """Content moderation configuration."""
-    enabled: bool = True
-    categories: List[str] = field(default_factory=lambda: ["OVERALL"])
-    blocklist_file: Optional[str] = None
-
-
-@dataclass
-class PromptInjectionConfig:
-    """Prompt injection detection configuration."""
-    enabled: bool = True
-
-
-@dataclass
-class InputGuardrailsConfig:
-    """Input guardrails configuration."""
-    content_moderation: ContentModerationConfig = field(default_factory=ContentModerationConfig)
-    prompt_injection: PromptInjectionConfig = field(default_factory=PromptInjectionConfig)
-    pii: Optional[PIITypesConfig] = None
-
-
-@dataclass
-class OutputGuardrailsConfig:
-    """Output guardrails configuration."""
-    enabled: bool = False
-    content_moderation: ContentModerationConfig = field(default_factory=ContentModerationConfig)
-    pii: Optional[PIITypesConfig] = None
-
-
-@dataclass
-class GuardrailsConfig:
-    """Main guardrails configuration."""
-    enabled: bool = False
-    mode: str = "block"
-    config_dir: str = "guardrails"
-    input: InputGuardrailsConfig = field(default_factory=InputGuardrailsConfig)
-    output: OutputGuardrailsConfig = field(default_factory=OutputGuardrailsConfig)
-    default_language: str = "en"
-    block_http_status: int = 400
-    block_message: str = "Inappropriate content detected."
-    inform_log_level: str = "warning"
-
-    # Runtime loaded data
-    blocklist: Set[str] = field(default_factory=set)
-
-    def __post_init__(self):
-        """Load external config files after initialization."""
-        self._load_blocklist()
-        self._load_pii_config()
-
-    def _load_blocklist(self) -> None:
-        """Load blocklist from file."""
-        pass  # Implementation details
-
-    def _load_pii_config(self) -> None:
-        """Load PII config from file."""
-        pass  # Implementation details
-
-
-# === Core Functions ===
-
-def extract_text_from_messages(messages: List[Any]) -> str:
-    """Extract plain text from messages for guardrails checking.
-
-    Args:
-        messages: List of OCI or Anthropic format messages
-
-    Returns:
-        Concatenated text content
-    """
-    pass  # Implementation details
-
-
-def apply_input_guardrails(
-    client: Any,
-    content: str,
-    config: GuardrailsConfig,
-    language_code: Optional[str] = None
-) -> GuardrailsCheckResult:
-    """Apply guardrails to input content.
-
-    Args:
-        client: OCI GenerativeAiInferenceClient
-        content: Text content to check
-        config: Guardrails configuration
-        language_code: Language code (defaults to config.default_language)
-
-    Returns:
-        GuardrailsCheckResult with check results
-    """
-    pass  # Implementation details
-
-
-def apply_output_guardrails(
-    client: Any,
-    content: str,
-    config: GuardrailsConfig,
-    language_code: Optional[str] = None
-) -> GuardrailsCheckResult:
-    """Apply guardrails to output content.
-
-    Args:
-        client: OCI GenerativeAiInferenceClient
-        content: Text content to check
-        config: Guardrails configuration
-        language_code: Language code
-
-    Returns:
-        GuardrailsCheckResult with check results and optionally redacted content
-    """
-    pass  # Implementation details
-
-
-def redact_pii(content: str, pii_result: PIIResult, config: PIITypesConfig) -> str:
-    """Redact PII entities from content.
-
-    Args:
-        content: Original text content
-        pii_result: PII detection result
-        config: PII configuration
-
-    Returns:
-        Content with PII redacted/masked
-    """
-    pass  # Implementation details
-
-
-def check_local_blocklist(content: str, blocklist: Set[str]) -> List[str]:
-    """Check content against local blocklist.
-
-    Args:
-        content: Text to check
-        blocklist: Set of blocked words/phrases
-
-    Returns:
-        List of matched blocklist entries
-    """
-    pass  # Implementation details
-
-
-def build_guardrail_configs_for_oci(
-    config: GuardrailsConfig,
-    check_type: str  # "input" or "output"
-) -> oci.generative_ai_inference.models.GuardrailConfigs:
-    """Build OCI GuardrailConfigs object from our config.
-
-    Args:
-        config: Our guardrails configuration
-        check_type: "input" or "output"
-
-    Returns:
-        OCI GuardrailConfigs object
-    """
-    pass  # Implementation details
+self.guardrails_enabled = False
+self.guardrails = None
 ```
+
+其余细分字段建议尽量收敛到 `self.guardrails` 对象内，不再平铺过多属性，避免 `Config` 继续膨胀。
+
+### 7.3 设计原则
+
+1. `Config` 负责读取 JSON 和基础校验
+2. `src/utils/guardrails.py` 负责 Guardrails 子配置对象构建
+3. 避免让 `src/config/__init__.py` 直接承载过多 Guardrails 业务逻辑
 
 ---
 
-### 2.5 修改 `src/config/__init__.py`
+## 八、请求链路改造计划
 
-**位置**: `src/config/__init__.py`
-**修改内容**:
+### 8.1 修改 `src/routes/handlers.py`
 
-#### 2.5.1 新增导入（文件顶部）
+#### 8.1.1 Input Guardrails 接入点
 
-```python
-from ..utils.guardrails import (
-    GuardrailsConfig,
-    InputGuardrailsConfig,
-    OutputGuardrailsConfig,
-    ContentModerationConfig,
-    PromptInjectionConfig,
-    PIITypesConfig,
-)
-```
+接入顺序：
 
-#### 2.5.2 新增 Config 类属性（`__init__` 方法中）
+1. 请求参数校验通过
+2. 解析出 model config
+3. 执行 Input Guardrails
+4. 通过后继续消息转换与推理
 
-在现有属性后添加:
+原因：
 
-```python
-# Guardrails configuration
-self.guardrails_enabled: bool = False
-self.guardrails_mode: str = "block"
-self.guardrails_config_dir: str = "guardrails"
-self.guardrails_input_config: Optional[InputGuardrailsConfig] = None
-self.guardrails_output_config: Optional[OutputGuardrailsConfig] = None
-self.guardrails_default_language: str = "en"
-self.guardrails_block_http_status: int = 400
-self.guardrails_block_message: str = "Inappropriate content detected."
-self.guardrails_inform_log_level: str = "warning"
-self.guardrails: Optional[GuardrailsConfig] = None
-```
+1. Guardrails 需要用到最终模型的 `compartment_id`
+2. 应在调用 OCI chat 前尽早拦截
 
-#### 2.5.3 新增配置加载逻辑（`_load_config` 方法中）
+#### 8.1.2 流式限制逻辑
 
-在 `server` 配置解析之后添加:
+当满足以下条件时：
 
-```python
-# Load guardrails configuration
-guardrails_conf = custom_config.get("guardrails", {})
-self.guardrails_enabled = bool(guardrails_conf.get("enabled", False))
+1. `body.stream == true`
+2. `guardrails.enabled == true`
+3. `guardrails.output.enabled == true`
 
-if self.guardrails_enabled:
-    self.guardrails_mode = str(guardrails_conf.get("mode", "block"))
-    self.guardrails_config_dir = str(guardrails_conf.get("config_dir", "guardrails"))
-    self.guardrails_default_language = str(guardrails_conf.get("default_language", "en"))
-    self.guardrails_block_http_status = int(guardrails_conf.get("block_http_status", 400))
-    self.guardrails_block_message = str(guardrails_conf.get("block_message", "Inappropriate content detected."))
-    self.guardrails_inform_log_level = str(guardrails_conf.get("inform_log_level", "warning"))
+则：
 
-    # Parse input config
-    input_conf = guardrails_conf.get("input", {})
-    cm_input_conf = input_conf.get("content_moderation", {})
-    pi_input_conf = input_conf.get("prompt_injection", {})
-    pii_input_conf = input_conf.get("pii", {})
+1. 若 `streaming_behavior == "reject"`:
+   - 返回 400
+   - 响应说明当前配置不支持流式 output guardrails
 
-    input_content_moderation = ContentModerationConfig(
-        enabled=bool(cm_input_conf.get("enabled", True)),
-        categories=cm_input_conf.get("categories", ["OVERALL"]),
-        blocklist_file=cm_input_conf.get("blocklist_file")
-    )
+2. 若 `streaming_behavior == "downgrade_to_non_stream"`:
+   - v1 可选实现
+   - 进入非流式生成路径
+   - 最终仍返回普通 JSON，不返回 SSE
 
-    input_prompt_injection = PromptInjectionConfig(
-        enabled=bool(pi_input_conf.get("enabled", True))
-    )
+建议 v1 先只实现 `reject`。
 
-    input_pii = None
-    if pii_input_conf.get("enabled", False):
-        input_pii = PIITypesConfig(
-            config_file=pii_input_conf.get("config_file"),
-            # Other fields loaded from file
-        )
+### 8.2 修改 `src/services/generation.py`
 
-    self.guardrails_input_config = InputGuardrailsConfig(
-        content_moderation=input_content_moderation,
-        prompt_injection=input_prompt_injection,
-        pii=input_pii
-    )
+#### 8.2.1 非流式输出接入点
 
-    # Parse output config
-    output_conf = guardrails_conf.get("output", {})
-    self.guardrails_output_enabled = bool(output_conf.get("enabled", False))
+在 `generate_oci_non_stream()` 中：
 
-    # ... similar parsing for output config
+1. OCI chat 响应解析为 `content_blocks`
+2. 若存在 output guardrails:
+   - 仅提取 `text` block 组成文本
+   - 调用 output guardrails
+3. 根据模式处理：
+   - `inform`: 只记录
+   - `block`: 命中 content moderation 时返回安全错误
+   - `block + pii redact/mask`: 替换 text block 后继续返回
 
-    # Build final GuardrailsConfig
-    self.guardrails = GuardrailsConfig(
-        enabled=self.guardrails_enabled,
-        mode=self.guardrails_mode,
-        config_dir=self.guardrails_config_dir,
-        input=self.guardrails_input_config,
-        output=self.guardrails_output_config,
-        default_language=self.guardrails_default_language,
-        block_http_status=self.guardrails_block_http_status,
-        block_message=self.guardrails_block_message,
-        inform_log_level=self.guardrails_inform_log_level
-    )
+#### 8.2.2 输出处理规则
 
-    logger.info(
-        f"Guardrails enabled: mode={self.guardrails_mode} "
-        f"input_cm={input_content_moderation.enabled} "
-        f"input_pi={input_prompt_injection.enabled} "
-        f"output={self.guardrails_output_enabled}"
-    )
-```
+1. 命中 output content moderation
+   - `block` 模式下返回安全错误响应
+   - `inform` 模式下记录命中并继续返回原始内容
 
-#### 2.5.4 新增 Guardrails 目录验证
+2. 命中 output PII
+   - 若配置 `action=none`:
+     - 仅记录
+   - 若 `action=redact` 或 `mask`:
+     - 仅替换 `text` content block
+     - 不改 `tool_use`
 
-```python
-# Validate guardrails config directory exists
-if self.guardrails_enabled:
-    guardrails_path = Path(self.guardrails_config_dir)
-    if not guardrails_path.exists():
-        logger.warning(f"Guardrails config directory not found: {self.guardrails_config_dir}")
-        # Optionally create it
-        guardrails_path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Created guardrails config directory: {self.guardrails_config_dir}")
-```
+#### 8.2.3 流式函数本次不改主逻辑
+
+`generate_oci_stream()` 在 v1 不做 output guardrails 半支持实现，避免：
+
+1. 内容先发后审
+2. SSE 协议破坏
+3. 与工具调用检测缓冲逻辑相互干扰
 
 ---
 
-### 2.6 修改 `src/routes/handlers.py`
+## 九、错误响应设计
 
-**位置**: `src/routes/handlers.py`
-**修改内容**:
-
-#### 2.6.1 新增导入（文件顶部）
-
-```python
-from ..utils.guardrails import (
-    apply_input_guardrails,
-    apply_output_guardrails,
-    extract_text_from_messages,
-    GuardrailsCheckResult,
-)
-```
-
-#### 2.6.2 修改 `handle_messages_request` 函数
-
-在消息验证之后、OCI 调用之前添加 Input Guardrails 检查:
-
-```python
-async def handle_messages_request(
-    body: dict,
-    req_model: str,
-    app_config
-) -> Union[StreamingResponse, JSONResponse]:
-    """Handle messages API endpoint."""
-
-    # ... 现有验证逻辑 ...
-
-    # === 新增: Input Guardrails 检查 ===
-    if app_config.guardrails_enabled and app_config.guardrails:
-        # 提取用户消息文本
-        user_messages = [m for m in messages if m.get("role") == "user"]
-        input_text = extract_text_from_messages(user_messages)
-
-        if input_text:
-            input_result = await apply_input_guardrails(
-                client=app_config.genai_client,
-                content=input_text,
-                config=app_config.guardrails,
-                language_code=None  # 使用默认语言
-            )
-
-            if not input_result.passed:
-                logger.warning(
-                    f"Input guardrails blocked request: {input_result.blocked_reason}"
-                )
-
-                if app_config.guardrails_mode == "block":
-                    return JSONResponse(
-                        status_code=app_config.guardrails_block_http_status,
-                        content={
-                            "type": "error",
-                            "error": {
-                                "type": "invalid_request_error",
-                                "message": app_config.guardrails_block_message
-                            }
-                        }
-                    )
-                else:
-                    # inform 模式: 记录日志但继续处理
-                    log_func = getattr(logger, app_config.guardrails_inform_log_level, logger.warning)
-                    log_func(f"Guardrails detected issues: {input_result.blocked_reason}")
-
-    # ... 现有消息转换和 OCI 调用逻辑 ...
-
-    # === 新增: Output Guardrails 检查（仅非流式） ===
-    if not body.get("stream", False):
-        if app_config.guardrails_enabled and app_config.guardrails:
-            if app_config.guardrails.output and app_config.guardrails.output.enabled:
-                # 提取响应文本
-                output_text = extract_output_text(response)  # 需要实现
-
-                if output_text:
-                    output_result = await apply_output_guardrails(
-                        client=app_config.genai_client,
-                        content=output_text,
-                        config=app_config.guardrails
-                    )
-
-                    if not output_result.passed:
-                        if output_result.redacted_content:
-                            # 替换响应中的内容
-                            response = update_response_content(response, output_result.redacted_content)
-
-    # ... 返回响应 ...
-```
-
-#### 2.6.3 处理流式响应的 Output Guardrails
-
-对于流式响应，需要缓冲完整输出后再检查:
-
-```python
-async def generate_oci_stream_with_guardrails(
-    oci_msgs,
-    params_with_tools,
-    message_id,
-    model_conf,
-    req_model,
-    genai_client,
-    cohere_messages,
-    debug_enabled,
-    debug_redact_media,
-    trace_ctx,
-    guardrails_config  # 新增参数
-):
-    """Streaming generation with output guardrails support."""
-
-    if not guardrails_config or not guardrails_config.output or not guardrails_config.output.enabled:
-        # Guardrails 未启用，使用原有逻辑
-        async for chunk in generate_oci_stream(...):
-            yield chunk
-        return
-
-    # 缓冲完整响应
-    full_content = []
-    async for chunk in generate_oci_stream(...):
-        # 提取文本内容
-        text = extract_text_from_sse_chunk(chunk)
-        if text:
-            full_content.append(text)
-        yield chunk
-
-    # 在流结束后检查（可选：通过 SSE 事件发送警告）
-    complete_text = "".join(full_content)
-    if complete_text:
-        result = await apply_output_guardrails(...)
-        if not result.passed:
-            # 发送 guardrails 警告事件
-            yield format_sse_event("guardrails_warning", {
-                "message": "Output content flagged by guardrails",
-                "details": result.blocked_reason
-            })
-```
-
----
-
-### 2.7 修改 `.gitignore`
-
-**位置**: `.gitignore`
-**新增内容**:
-
-```gitignore
-# Guardrails configuration (may contain sensitive blocklists)
-guardrails/blocklist.txt
-guardrails/pii_config.json
-```
-
----
-
-### 2.8 新建 `tests/test_guardrails.py`
-
-**位置**: `tests/test_guardrails.py`
-**内容结构**:
-
-```python
-"""
-Unit tests for Guardrails integration.
-"""
-
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-
-from src.utils.guardrails import (
-    GuardrailsConfig,
-    GuardrailsCheckResult,
-    ContentModerationResult,
-    PromptInjectionResult,
-    PIIResult,
-    PIIEntity,
-    apply_input_guardrails,
-    apply_output_guardrails,
-    extract_text_from_messages,
-    redact_pii,
-    check_local_blocklist,
-)
-
-
-class TestExtractTextFromMessages:
-    """Tests for extract_text_from_messages function."""
-
-    def test_extract_simple_text(self):
-        """Test extracting text from simple text messages."""
-        pass
-
-    def test_extract_multimodal_messages(self):
-        """Test extracting text from messages with images."""
-        pass
-
-    def test_extract_empty_messages(self):
-        """Test handling empty message list."""
-        pass
-
-
-class TestCheckLocalBlocklist:
-    """Tests for local blocklist checking."""
-
-    def test_no_match(self):
-        """Test content with no blocklist matches."""
-        pass
-
-    def test_single_match(self):
-        """Test content with single blocklist match."""
-        pass
-
-    def test_multiple_matches(self):
-        """Test content with multiple blocklist matches."""
-        pass
-
-    def test_case_insensitive(self):
-        """Test case-insensitive matching."""
-        pass
-
-    def test_regex_pattern(self):
-        """Test regex pattern matching."""
-        pass
-
-
-class TestRedactPII:
-    """Tests for PII redaction."""
-
-    def test_redact_email(self):
-        """Test email redaction."""
-        pass
-
-    def test_redact_phone(self):
-        """Test phone number redaction."""
-        pass
-
-    def test_mask_email_preserve_domain(self):
-        """Test email masking with domain preservation."""
-        pass
-
-    def test_multiple_pii_types(self):
-        """Test redacting multiple PII types."""
-        pass
-
-
-class TestApplyInputGuardrails:
-    """Tests for input guardrails."""
-
-    @pytest.mark.asyncio
-    async def test_clean_content_passes(self):
-        """Test that clean content passes all checks."""
-        pass
-
-    @pytest.mark.asyncio
-    async def test_content_moderation_block(self):
-        """Test that inappropriate content is blocked."""
-        pass
-
-    @pytest.mark.asyncio
-    async def test_prompt_injection_detection(self):
-        """Test prompt injection detection."""
-        pass
-
-    @pytest.mark.asyncio
-    async def test_pii_detection(self):
-        """Test PII detection in input."""
-        pass
-
-    @pytest.mark.asyncio
-    async def test_inform_mode(self):
-        """Test that inform mode doesn't block."""
-        pass
-
-
-class TestApplyOutputGuardrails:
-    """Tests for output guardrails."""
-
-    @pytest.mark.asyncio
-    async def test_clean_output_passes(self):
-        """Test that clean output passes."""
-        pass
-
-    @pytest.mark.asyncio
-    async def test_output_pii_redaction(self):
-        """Test PII redaction in output."""
-        pass
-
-    @pytest.mark.asyncio
-    async def test_output_content_moderation(self):
-        """Test content moderation on output."""
-        pass
-
-
-class TestGuardrailsConfig:
-    """Tests for GuardrailsConfig class."""
-
-    def test_load_blocklist_from_file(self):
-        """Test loading blocklist from file."""
-        pass
-
-    def test_load_pii_config_from_file(self):
-        """Test loading PII config from file."""
-        pass
-
-    def test_missing_config_file_handling(self):
-        """Test handling of missing config files."""
-        pass
-
-    def test_disabled_guardrails(self):
-        """Test behavior when guardrails disabled."""
-        pass
-
-
-class TestIntegration:
-    """Integration tests with mocked OCI client."""
-
-    @pytest.mark.asyncio
-    async def test_full_input_flow(self):
-        """Test complete input guardrails flow."""
-        pass
-
-    @pytest.mark.asyncio
-    async def test_full_output_flow(self):
-        """Test complete output guardrails flow."""
-        pass
-```
-
----
-
-## 三、实现顺序
-
-```
-Phase 1: 基础设施 (Day 1 上午)
-├── 1.1 创建 guardrails/ 目录
-├── 1.2 创建 blocklist.txt.template
-├── 1.3 创建 pii_config.json.template
-├── 1.4 更新 .gitignore
-└── 1.5 更新 config.json.template
-
-Phase 2: 核心模块 (Day 1 下午 - Day 2)
-├── 2.1 创建 src/utils/guardrails.py
-│   ├── 2.1.1 数据类定义
-│   ├── 2.1.2 配置加载逻辑
-│   ├── 2.1.3 文本提取函数
-│   ├── 2.1.4 OCI API 调用封装
-│   ├── 2.1.5 PII 遮蔽逻辑
-│   └── 2.1.6 本地过滤词检查
-└── 2.2 修改 src/config/__init__.py
-    ├── 2.2.1 新增属性
-    ├── 2.2.2 解析逻辑
-    └── 2.2.3 配置验证
-
-Phase 3: 集成到请求流程 (Day 3)
-├── 3.1 修改 src/routes/handlers.py
-│   ├── 3.1.1 Input Guardrails 集成
-│   ├── 3.1.2 Output Guardrails 集成 (非流式)
-│   └── 3.1.3 错误响应格式化
-└── 3.2 修改 src/services/generation.py (流式支持)
-    ├── 3.2.1 流式缓冲逻辑
-    └── 3.2.2 流式 guardrails 事件
-
-Phase 4: 测试 (Day 3 下午 - Day 4)
-├── 4.1 单元测试
-│   ├── 4.1.1 文本提取测试
-│   ├── 4.1.2 过滤词检查测试
-│   ├── 4.1.3 PII 遮蔽测试
-│   └── 4.1.4 配置加载测试
-├── 4.2 集成测试
-│   ├── 4.2.1 端到端 input flow
-│   └── 4.2.2 端到端 output flow
-└── 4.3 手动测试
-    ├── 4.3.1 block 模式测试
-    ├── 4.3.2 inform 模式测试
-    └── 4.3.3 流式响应测试
-
-Phase 5: 文档更新 (Day 4)
-├── 5.1 更新 CLAUDE.md
-├── 5.2 更新 README.md
-└── 5.3 创建 GUARDRAILS.md (详细使用文档)
-```
-
----
-
-## 四、API 调用流程图
-
-### 4.1 Input Guardrails 流程
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         handle_messages_request()                        │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-                    ┌───────────────────────────────┐
-                    │   guardrails.enabled == true? │
-                    └───────────────────────────────┘
-                           │              │
-                          Yes             No
-                           │              │
-                           ▼              │
-          ┌────────────────────────────────┐
-          │ extract_text_from_messages()   │
-          │ (提取 user 消息文本)            │
-          └────────────────────────────────┘
-                           │
-                           ▼
-          ┌────────────────────────────────┐
-          │ apply_input_guardrails()       │
-          │                                │
-          │  1. 本地过滤词检查 (可选)        │
-          │  2. 调用 OCI ApplyGuardrails   │
-          │  3. 解析结果                    │
-          └────────────────────────────────┘
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │ passed?     │
-                    └─────────────┘
-                      │         │
-                     Yes        No
-                      │         │
-                      │         ▼
-                      │    ┌─────────────────┐
-                      │    │ mode == "block"? │
-                      │    └─────────────────┘
-                      │        │         │
-                      │       Yes        No (inform)
-                      │        │         │
-                      │        ▼         ▼
-                      │   ┌─────────┐  ┌──────────┐
-                      │   │ 返回    │  │ 记录日志  │
-                      │   │ 400错误 │  │ 继续处理  │
-                      │   └─────────┘  └──────────┘
-                      │
-                      ▼
-          ┌────────────────────────────────┐
-          │ 继续正常请求处理流程             │
-          │ (消息转换、OCI 推理等)           │
-          └────────────────────────────────┘
-```
-
-### 4.2 Output Guardrails 流程 (非流式)
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    OCI 推理完成，获得响应                                 │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-                    ┌───────────────────────────────────┐
-                    │ guardrails.output.enabled == true?│
-                    └───────────────────────────────────┘
-                           │              │
-                          Yes             No
-                           │              │
-                           ▼              │
-          ┌────────────────────────────────┐
-          │ extract_output_text(response)  │
-          └────────────────────────────────┘
-                           │
-                           ▼
-          ┌────────────────────────────────┐
-          │ apply_output_guardrails()      │
-          │                                │
-          │  1. Content Moderation 检查    │
-          │  2. PII 检测与遮蔽             │
-          └────────────────────────────────┘
-                           │
-                           ▼
-                    ┌─────────────────┐
-                    │ passed?         │
-                    └─────────────────┘
-                      │         │
-                     Yes        No
-                      │         │
-                      │         ▼
-                      │    ┌─────────────────────────┐
-                      │    │ redacted_content 存在?  │
-                      │    └─────────────────────────┘
-                      │        │         │
-                      │       Yes        No
-                      │        │         │
-                      │        ▼         ▼
-                      │   ┌──────────┐ ┌────────────┐
-                      │   │ 替换响应  │ │ 返回错误/  │
-                      │   │ 内容      │ │ 默认消息    │
-                      │   └──────────┘ └────────────┘
-                      │
-                      ▼
-          ┌────────────────────────────────┐
-          │ 返回处理后的响应给客户端         │
-          └────────────────────────────────┘
-```
-
----
-
-## 五、错误响应格式
-
-### 5.1 Block 模式错误响应
+### 9.1 Input 拦截响应
 
 ```json
 {
   "type": "error",
   "error": {
     "type": "invalid_request_error",
-    "message": "Inappropriate content detected. Please revise your request."
+    "message": "Request blocked by guardrails policy."
   }
 }
 ```
 
-### 5.2 详细错误响应 (可选，调试用)
+### 9.2 Output 拦截响应
+
+当输出内容命中强拦截规则时，非流式返回：
 
 ```json
 {
   "type": "error",
   "error": {
     "type": "invalid_request_error",
-    "message": "Inappropriate content detected.",
-    "details": {
-      "content_moderation": {
-        "overall_score": 1.0,
-        "categories": ["HATE", "HARASSMENT"]
-      },
-      "prompt_injection": {
-        "score": 0.0
-      },
-      "pii": {
-        "detected_types": ["EMAIL"],
-        "count": 1
-      }
-    }
+    "message": "Response blocked by guardrails policy."
   }
 }
 ```
 
-### 5.3 流式响应中的 Guardrails 警告事件
+### 9.3 日志与 debug dump
 
-```
-event: guardrails_warning
-data: {"type": "guardrails_warning", "message": "Output flagged", "action": "logged"}
-```
+v1 规则：
+
+1. 默认不在客户端返回详细命中类别
+2. 默认日志中不记录原始敏感文本
+3. debug dump 中记录摘要，不记录未脱敏 PII 明文
 
 ---
 
-## 六、配置示例
+## 十、测试计划
 
-### 6.1 最小配置 (仅启用 Prompt Injection 防护)
+### 10.1 单元测试
 
-```json
-{
-  "guardrails": {
-    "enabled": true,
-    "mode": "block",
-    "input": {
-      "content_moderation": { "enabled": false },
-      "prompt_injection": { "enabled": true },
-      "pii": { "enabled": false }
-    },
-    "output": { "enabled": false }
-  }
-}
-```
+文件：
 
-### 6.2 完整配置 (全部启用)
+1. `test/test_guardrails.py`
 
-```json
-{
-  "guardrails": {
-    "enabled": true,
-    "mode": "block",
-    "config_dir": "guardrails",
-    "input": {
-      "content_moderation": {
-        "enabled": true,
-        "categories": ["OVERALL", "BLOCKLIST"],
-        "blocklist_file": "blocklist.txt"
-      },
-      "prompt_injection": { "enabled": true },
-      "pii": {
-        "enabled": true,
-        "config_file": "pii_config.json"
-      }
-    },
-    "output": {
-      "enabled": true,
-      "content_moderation": {
-        "enabled": true,
-        "categories": ["OVERALL"]
-      },
-      "pii": {
-        "enabled": true,
-        "config_file": "pii_config.json",
-        "action": "redact"
-      }
-    },
-    "default_language": "en",
-    "block_http_status": 400,
-    "block_message": "Your request could not be processed due to content policy violations.",
-    "inform_log_level": "warning"
-  }
-}
-```
+覆盖范围：
 
-### 6.3 Inform 模式 (仅记录，不拦截)
+1. 输入文本提取
+   - 只提取 user
+   - 包含 system
+   - 包含 tool_result
+   - 忽略 image/video
 
-```json
-{
-  "guardrails": {
-    "enabled": true,
-    "mode": "inform",
-    "inform_log_level": "info",
-    "input": {
-      "content_moderation": { "enabled": true },
-      "prompt_injection": { "enabled": true },
-      "pii": { "enabled": true }
-    },
-    "output": { "enabled": false }
-  }
-}
-```
+2. blocklist
+   - 空文件
+   - 单条命中
+   - 多条命中
+   - 大小写
+   - 注释和空行
+
+3. PII 文本处理
+   - redact
+   - mask
+   - 多实体
+   - offset 重排
+
+4. OCI 结果解析
+   - content moderation 命中
+   - prompt injection 命中
+   - pii 命中
+   - 空结果
+
+5. 配置路径解析
+   - 相对 `config.json` 路径
+   - blocklist 缺失
+   - 非法枚举值
+
+### 10.2 服务级测试
+
+建议新增 mock 级测试，验证：
+
+1. Input Guardrails block 模式
+2. Input Guardrails inform 模式
+3. Guardrails API timeout + `fail_mode=open`
+4. Guardrails API timeout + `fail_mode=closed`
+5. Output text redact
+6. Output moderation block
+7. Output guardrails 开启时流式请求被拒绝
+
+### 10.3 接口级回归测试
+
+需补充或更新：
+
+1. 非流式 messages 接口在 guardrails 关闭时行为不变
+2. 流式 SSE 在 guardrails 关闭时行为不变
+3. 开启 input guardrails 后违规输入被拦截
+4. 开启 output guardrails 后非流式输出被替换或拦截
 
 ---
 
-## 七、风险与缓解措施
+## 十一、文档更新计划
 
-| 风险 | 影响 | 缓解措施 |
+### 11.1 README.md / README_CN.md
+
+补充内容：
+
+1. `guardrails` 配置说明
+2. v1 支持范围
+3. 流式限制说明
+4. 多模态限制说明
+5. 失败策略说明
+
+### 11.2 不单独创建 `GUARDRAILS.md`
+
+v1 先把核心说明放在主 README 和中文 README 中，避免文档分叉。
+
+---
+
+## 十二、实施阶段
+
+### Phase 1: 配置与框架
+
+1. 更新 `config.json.template`
+2. 新建 `guardrails/blocklist.txt.template`
+3. 更新 `.gitignore`
+4. 在 `src/config/__init__.py` 中解析 Guardrails 配置
+
+交付结果：
+
+1. 服务可识别 Guardrails 配置
+2. Guardrails 关闭时行为不变
+
+### Phase 2: 核心 Guardrails 模块
+
+1. 新建 `src/utils/guardrails.py`
+2. 实现 blocklist 加载
+3. 实现输入文本抽取
+4. 实现 OCI `apply_guardrails` 封装
+5. 实现结果解析与日志摘要
+6. 实现 PII redact/mask
+
+交付结果：
+
+1. 核心能力可独立单测
+
+### Phase 3: Input 集成
+
+1. 在 `src/routes/handlers.py` 接入 Input Guardrails
+2. 增加 stream + output guardrails 的限制判断
+
+交付结果：
+
+1. 违规输入可被拦截或记录
+2. 不支持的流式组合被显式拒绝
+
+### Phase 4: Output 集成
+
+1. 在 `src/services/generation.py` 接入非流式 Output Guardrails
+2. 实现 text block 替换
+3. 实现安全错误响应
+
+交付结果：
+
+1. 非流式输出支持 redact / moderation block
+
+### Phase 5: 测试与文档
+
+1. 完成单元测试
+2. 完成 mock 服务级测试
+3. 更新 README.md / README_CN.md
+4. 手动验证关键场景
+
+---
+
+## 十三、验收标准
+
+### 13.1 功能验收
+
+- [ ] `guardrails.enabled=false` 时，现有接口行为不变
+- [ ] Input Guardrails 可检测 content moderation
+- [ ] Input Guardrails 可检测 prompt injection
+- [ ] Input Guardrails 可检测 PII
+- [ ] 本地 blocklist 可生效
+- [ ] 非流式 Output Guardrails 可执行 content moderation
+- [ ] 非流式 Output Guardrails 可执行 PII redact/mask
+- [ ] `inform` 模式只记录不拦截
+- [ ] `block` 模式按策略拦截
+- [ ] 流式 + output guardrails 的组合被显式拒绝或按配置降级
+
+### 13.2 兼容性验收
+
+- [ ] 非流式 Anthropic JSON 结构不变
+- [ ] 流式 SSE 在 guardrails 关闭时结构不变
+- [ ] 现有工具调用逻辑不被破坏
+- [ ] 多模型路由逻辑不被破坏
+
+### 13.3 测试验收
+
+- [ ] 新增 Guardrails 单元测试通过
+- [ ] 现有测试无回归
+- [ ] 至少覆盖 block / inform / fail_open / fail_closed 四类核心路径
+
+---
+
+## 十四、风险与应对
+
+| 风险 | 影响 | 应对策略 |
 |------|------|----------|
-| OCI API 延迟增加 | 每次请求增加 ~100-500ms | 1. 并行调用 OCI 推理和 Guardrails 2. 可选跳过检查 |
-| OCI API 不可用 | 请求失败 | 1. 添加超时和重试 2. 可选降级策略（跳过检查） |
-| 误报 (False Positive) | 合法请求被拦截 | 1. 使用 inform 模式调试 2. 调整置信度阈值 |
-| 漏报 (False Negative) | 有害内容通过 | 1. 定期更新过滤词 2. 多层检查 |
-| 流式响应处理复杂 | 实现难度高 | 1. Phase 3 可选 2. 先实现缓冲后检查 |
-| PII 仅支持英文 | 多语言场景受限 | 1. 文档说明 2. 等待 OCI 支持 |
+| Guardrails API 增加额外延迟 | 请求耗时上升 | v1 先接受串行开销，后续再优化 |
+| Guardrails API 故障 | 影响请求成功率 | 配置 `fail_mode`，按输入/输出区分策略 |
+| 日志记录敏感内容 | 合规风险 | 默认 `redact_logs=true`，日志只记摘要 |
+| 流式输出无法真正拦截 | 保护不完整 | v1 明确拒绝该组合，不做半支持 |
+| 多模态请求只检查文本 | 有覆盖盲区 | README 明确限制，后续版本补齐 |
+| tool_result 中存在注入文本 | 输入侧绕过 | 默认纳入 input guardrails 检查 |
 
 ---
 
-## 八、验收标准
+## 十五、后续版本路线
 
-### 8.1 功能验收
+以下能力留待 v2 及以后：
 
-- [ ] Input Guardrails 正常工作
-  - [ ] Content Moderation 检测有害内容
-  - [ ] Prompt Injection 检测注入攻击
-  - [ ] PII 检测个人信息
-  - [ ] 本地过滤词检查
-- [ ] Output Guardrails 正常工作
-  - [ ] Content Moderation 检查输出
-  - [ ] PII 遮蔽功能
-- [ ] Block 模式正确拦截违规请求
-- [ ] Inform 模式正确记录日志
-- [ ] 流式响应支持（可选）
-- [ ] 配置文件正确加载
-
-### 8.2 性能验收
-
-- [ ] 单次 Guardrails 检查延迟 < 500ms
-- [ ] 不影响非 Guardrails 请求性能
-
-### 8.3 测试验收
-
-- [ ] 单元测试覆盖率 > 80%
-- [ ] 所有测试通过
-- [ ] 手动测试场景通过
+1. `streaming_behavior=downgrade_to_non_stream` 的完整实现
+2. 审计日志与 metrics
+3. 配置热重载
+4. 多模态 Guardrails
+5. 更细粒度的按模型/按路由 Guardrails 策略
 
 ---
 
-## 九、后续扩展（未来版本）
+## 十六、结论
 
-1. **自定义规则引擎**: 支持 `custom_rules.json` 中的正则规则
-2. **热重载**: 不重启服务更新过滤词
-3. **多语言 PII**: 等待 OCI 支持后启用
-4. **指标与监控**: Prometheus metrics for guardrails
-5. **审计日志**: 记录所有 guardrails 触发事件
+这版执行计划相对旧计划做了以下关键修正：
 
----
+1. 明确了真正的代码接入点
+   - Input 在 `handlers.py`
+   - 非流式 Output 在 `generation.py`
 
-## 十、总结
+2. 删除了不可落地的流式 output guardrails 伪方案
 
-| 项目 | 内容 |
-|------|------|
-| **新建文件** | 6 个 |
-| **修改文件** | 4 个 |
-| **预估工作量** | 4 天 |
-| **主要依赖** | OCI Generative AI SDK (已有) |
-| **向后兼容** | ✅ 完全兼容（guardrails.enabled=false 时无影响） |
+3. 把 `tool_result` 纳入输入检查范围
 
----
+4. 增加了失败策略、路径解析、日志脱敏和兼容性约束
 
-## 附录 A: OCI ApplyGuardrails API 参考
+5. 把测试计划改成与当前仓库实际结构一致的 `test/` 目录方案
 
-**API 端点**: `GenerativeAiInferenceClient.apply_guardrails()`
-
-**请求结构**:
-```python
-apply_guardrails_details = oci.generative_ai_inference.models.ApplyGuardrailsDetails(
-    input=oci.generative_ai_inference.models.GuardrailsTextInput(
-        type="TEXT",
-        content="要检查的文本内容",
-        language_code="en"
-    ),
-    guardrail_configs=oci.generative_ai_inference.models.GuardrailConfigs(
-        content_moderation_config=oci.generative_ai_inference.models.ContentModerationConfiguration(
-            categories=["OVERALL", "BLOCKLIST"]
-        ),
-        personally_identifiable_information_config=oci.generative_ai_inference.models.PersonallyIdentifiableInformationConfiguration(
-            types=["PERSON", "EMAIL", "TELEPHONE_NUMBER"]
-        )
-    ),
-    compartment_id="ocid1.compartment.oc1..."
-)
-```
-
-**响应结构**:
-```json
-{
-  "results": {
-    "contentModeration": {
-      "categories": [
-        { "name": "OVERALL", "score": 1.0 },
-        { "name": "BLOCKLIST", "score": 0.0 }
-      ]
-    },
-    "personallyIdentifiableInformation": [
-      {
-        "length": 15,
-        "offset": 142,
-        "text": "abc@example.com",
-        "label": "EMAIL",
-        "score": 0.95
-      }
-    ],
-    "promptInjection": { "score": 1.0 }
-  }
-}
-```
-
----
-
-## 附录 B: 支持的 PII 类型
-
-| 类型 | 描述 |
-|------|------|
-| `PERSON` | 人名 |
-| `EMAIL` | 电子邮件地址 |
-| `TELEPHONE_NUMBER` | 电话号码 |
-| `CREDIT_CARD_NUMBER` | 信用卡号 |
-| `IP_ADDRESS` | IP 地址 |
-| `ADDRESS` | 物理地址 |
-| `DATE_TIME` | 日期时间 |
-| `LOCATION` | 地理位置 |
-
----
-
-## 附录 C: 支持的语言 (Content Moderation & Prompt Injection)
-
-- Arabic (Egyptian, Levantine, Saudi)
-- BCMS (Bosnian, Croatian, Montenegrin, Serbian)
-- Chinese (Standard Simplified, Standard Traditional)
-- Dutch
-- English
-- French (France)
-- German (Germany, Switzerland)
-- Hebrew
-- Hindi
-- Indonesian
-- Italian
-- Japanese
-- Korean
-- Norwegian (Bokmål)
-- Polish
-- Portuguese (Brazilian, Portugal)
-- Russian (Russia, Ukraine)
-- Spanish (Spain)
-- Swedish
-- Thai
-- Turkish
-- Ukrainian
-- Welsh
-
-**注意**: PII 检测目前仅支持英文。
+该计划可以直接作为后续实现基线使用。

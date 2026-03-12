@@ -82,6 +82,53 @@
     "auth_mode": "bearer",
     "max_detail_bytes": 2000000
   },
+  "guardrails": {
+    "enabled": false,
+    "mode": "block",
+    "default_language": "en",
+    "config_dir": "guardrails",
+    "block_http_status": 400,
+    "block_message": "Request blocked by guardrails policy.",
+    "streaming_behavior": "reject",
+    "log_details": false,
+    "redact_logs": true,
+    "input": {
+      "enabled": true,
+      "fail_mode": "closed",
+      "include_system": false,
+      "include_tool_results": true,
+      "content_moderation": {
+        "enabled": true,
+        "categories": ["OVERALL"]
+      },
+      "prompt_injection": {
+        "enabled": true,
+        "threshold": 0.95
+      },
+      "pii": {
+        "enabled": false,
+        "types": ["EMAIL", "PERSON", "TELEPHONE_NUMBER"]
+      },
+      "local_blocklist": {
+        "enabled": false,
+        "file": "blocklist.txt"
+      }
+    },
+    "output": {
+      "enabled": false,
+      "fail_mode": "open",
+      "content_moderation": {
+        "enabled": true,
+        "categories": ["OVERALL"]
+      },
+      "pii": {
+        "enabled": false,
+        "types": ["EMAIL", "PERSON", "TELEPHONE_NUMBER"],
+        "action": "redact",
+        "placeholder": "[REDACTED]"
+      }
+    }
+  },
   "server": {
     "host": "127.0.0.1",
     "port": 8000,

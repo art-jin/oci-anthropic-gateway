@@ -1,6 +1,6 @@
 # OCI-Anthropic Gateway
 
-[中文文档](README_CN.md) | English
+[中文文档](README_CN.md) | English | [AI Guardrails Guide](AIGUARDRAILS.md)
 
 A production-ready translation layer that enables OCI GenAI models to work seamlessly with Anthropic's API format, including comprehensive tool calling support.
 
@@ -19,6 +19,7 @@ This gateway acts as a bridge between Oracle Cloud Infrastructure (OCI) GenAI se
 - ✅ Streaming and non-streaming responses
 - ✅ Prompt caching support
 - ✅ Vision/image analysis
+- ✅ OCI Guardrails integration for input and non-streaming output
 - ✅ Modular, maintainable codebase
 - ✅ Production-ready with comprehensive error handling
 
@@ -115,6 +116,42 @@ You can also control gateway logging verbosity with `LOG_LEVEL`:
 LOG_LEVEL=INFO python main.py
 LOG_LEVEL=DEBUG python main.py
 ```
+
+### Guardrails
+
+The gateway can optionally call OCI `ApplyGuardrails` before model inference and after non-streaming model responses.
+
+Key points:
+
+- Input guardrails support content moderation, prompt injection detection, PII detection, and an optional local blocklist.
+- Output guardrails currently support non-streaming responses only.
+- If `guardrails.output.enabled=true`, streaming requests are rejected by default, or can be downgraded to a non-streaming JSON response with `streaming_behavior: "downgrade_to_non_stream"`.
+- Only text content is checked. Images and video are not sent to Guardrails in this version.
+- The gateway now requires a recent OCI SDK for prompt injection support. Use `oci>=2.164.0`.
+- Generic non-stream responses are normalized back to plain Anthropic text blocks; OCI `TextContent` objects are no longer leaked as JSON strings.
+
+Minimal example:
+
+```json
+{
+  "guardrails": {
+    "enabled": true,
+    "mode": "block",
+    "streaming_behavior": "reject",
+    "input": {
+      "enabled": true,
+      "prompt_injection": { "enabled": true }
+    },
+    "output": {
+      "enabled": false
+    }
+  }
+}
+```
+
+To enable a local blocklist, create `guardrails/blocklist.txt` from `guardrails/blocklist.txt.template`.
+
+Detailed configuration, test scripts, modes, and deployment guidance are documented in [AIGUARDRAILS.md](AIGUARDRAILS.md).
 
 ## Docker Deployment
 
@@ -318,7 +355,8 @@ oci-anthropic-gateway/
 │   │   ├── cache.py            # Cache control utilities
 │   │   ├── json_helper.py      # JSON parsing and fixing
 │   │   ├── logging_config.py   # Logging configuration
-│   │   └── content_converter.py # Content format conversion
+│   │   ├── content_converter.py # Content format conversion
+│   │   └── guardrails.py       # OCI Guardrails integration
 │   ├── services/                # Business logic
 │   │   └── generation.py       # OCI generation service
 │   └── routes/                  # API routes

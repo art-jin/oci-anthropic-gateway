@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from ..utils.constants import DEFAULT_MAX_TOKENS
+from ..utils.guardrails import GuardrailsConfig, build_guardrails_config
 
 # --- Logging configuration ---
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +52,7 @@ class Config:
         self.server_host: str = "127.0.0.1"
         self.server_port: int = 8000
         self.server_log_level: str = "warning"
+        self.guardrails: Optional[GuardrailsConfig] = None
 
         self._load_config()
         self._init_oci_client()
@@ -130,6 +132,10 @@ class Config:
             self.server_host = host.strip()
             self.server_port = port_int
             self.server_log_level = normalized_log_level
+            self.guardrails = build_guardrails_config(
+                custom_config.get("guardrails", {}),
+                config_file_path=str(config_path),
+            )
 
             self.default_model_conf = self.model_definitions.get(self.default_model_name)
 
@@ -163,7 +169,8 @@ class Config:
                 f"debug_ui={self.debug_ui_enabled} "
                 f"rate_limit={self.rate_limit_enabled} "
                 f"nl_fallback={self.enable_nl_tool_fallback} "
-                f"server={self.server_host}:{self.server_port} log_level={self.server_log_level}"
+                f"server={self.server_host}:{self.server_port} log_level={self.server_log_level} "
+                f"guardrails={bool(self.guardrails and self.guardrails.enabled)}"
             )
 
         except Exception as e:

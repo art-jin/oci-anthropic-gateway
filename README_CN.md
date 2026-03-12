@@ -1,6 +1,6 @@
 # OCI-Anthropic 网关
 
-English | [中文文档](README_CN.md)
+English | [中文文档](README_CN.md) | [AI Guardrails 指南](AIGUARDRAILS.md)
 
 一个生产就绪的转换层，使 OCI GenAI 模型能够无缝兼容 Anthropic 的 API 格式，包括全面的工具调用支持。
 
@@ -19,6 +19,7 @@ English | [中文文档](README_CN.md)
 - ✅ 流式和非流式响应
 - ✅ 提示缓存支持
 - ✅ 视觉/图像分析
+- ✅ OCI Guardrails 输入与非流式输出防护
 - ✅ 模块化、可维护的代码库
 - ✅ 生产就绪，包含全面的错误处理
 
@@ -97,6 +98,42 @@ python main.py
 
 网关默认运行在 `0.0.0.0:8000`。
 
+### Guardrails
+
+网关现在可以选择性地在模型推理前后调用 OCI `ApplyGuardrails`。
+
+当前版本说明：
+
+1. Input Guardrails 支持内容审核、提示注入检测、PII 检测，以及可选的本地 blocklist。
+2. Output Guardrails 目前只支持非流式响应。
+3. 当 `guardrails.output.enabled=true` 时，默认拒绝 `stream=true` 请求，也可以通过 `streaming_behavior: "downgrade_to_non_stream"` 降级为普通 JSON 响应。
+4. 当前版本只检查文本内容，不检查图片和视频。
+5. Prompt Injection 需要较新的 OCI SDK，当前项目要求 `oci>=2.164.0`。
+6. Generic 非流式响应已经修复为纯文本输出，不再把 OCI `TextContent` 直接透传成 JSON 字符串。
+
+最小示例：
+
+```json
+{
+  "guardrails": {
+    "enabled": true,
+    "mode": "block",
+    "streaming_behavior": "reject",
+    "input": {
+      "enabled": true,
+      "prompt_injection": { "enabled": true }
+    },
+    "output": {
+      "enabled": false
+    }
+  }
+}
+```
+
+如需启用本地 blocklist，请基于 `guardrails/blocklist.txt.template` 创建 `guardrails/blocklist.txt`。
+
+更详细的 Guardrails 配置、使用方式、测试脚本和场景说明请参见 [AIGUARDRAILS.md](AIGUARDRAILS.md)。
+
 ## 架构
 
 代码库采用模块化结构组织，以提高可维护性：
@@ -115,7 +152,8 @@ oci-anthropic-gateway/
 │   │   ├── cache.py            # 缓存控制工具
 │   │   ├── json_helper.py      # JSON 解析和修复
 │   │   ├── logging_config.py   # 日志配置
-│   │   └── content_converter.py # 内容格式转换
+│   │   ├── content_converter.py # 内容格式转换
+│   │   └── guardrails.py       # OCI Guardrails 集成
 │   ├── services/                # 业务逻辑
 │   │   └── generation.py       # OCI 生成服务
 │   └── routes/                  # API 路由

@@ -1,0 +1,7 @@
+# One entry per line.
+# Lines starting with # are ignored.
+# Prefix with regex: to use a regular expression.
+#
+# Examples:
+# secret project name
+# regex:\b\d{4}-\d{4}-\d{4}-\d{4}\b

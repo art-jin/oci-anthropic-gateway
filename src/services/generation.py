@@ -20,12 +20,42 @@ from ..utils.content_converter import (
 from ..utils.json_helper import detect_all_tool_call_blocks, detect_natural_language_tool_calls
 from ..utils.token import estimate_tokens
 from ..utils.debug_dump import DebugDumpConfig, write_debug_dump
+from ..utils.guardrails import (
+    apply_output_guardrails,
+    extract_text_blocks,
+    replace_text_blocks,
+    summarize_guardrails_result,
+)
 
 logger = logging.getLogger("oci-gateway")
 
 
 class OciTargetConfigError(ValueError):
     """Raised when model routing configuration for OCI GenAI is incomplete."""
+
+
+def _extract_text_from_oci_content(content) -> str:
+    """Normalize OCI SDK content blocks into plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+                continue
+            text_value = getattr(item, "text", None)
+            if isinstance(text_value, str):
+                parts.append(text_value)
+                continue
+            parts.append(str(item))
+        return "".join(parts)
+    text_value = getattr(content, "text", None)
+    if isinstance(text_value, str):
+        return text_value
+    return str(content)
 
 
 def _validate_oci_targeting(model_conf: dict, requested_model: str) -> None:
@@ -122,6 +152,7 @@ async def generate_oci_non_stream(
     debug_enabled: bool = False,
     debug_redact_media: bool = True,
     trace_ctx: Optional[dict] = None,
+    guardrails_config=None,
 ):
     """
     Generate non-streaming response from OCI GenAI and format it as Anthropic-compatible JSON.
@@ -410,17 +441,11 @@ RULES:
                         if hasattr(choice, 'message'):
                             msg = choice.message
                             if hasattr(msg, 'content'):
-                                if isinstance(msg.content, list):
-                                    accumulated_text = "".join([c.get('text', '') if isinstance(c, dict) else str(c) for c in msg.content])
-                                else:
-                                    accumulated_text = msg.content
+                                accumulated_text = _extract_text_from_oci_content(msg.content)
                     elif hasattr(chat_response, 'message'):
                         msg = chat_response.message
                         if hasattr(msg, 'content'):
-                            if isinstance(msg.content, list):
-                                accumulated_text = "".join([c.get('text', '') if isinstance(c, dict) else str(c) for c in msg.content])
-                            else:
-                                accumulated_text = msg.content
+                            accumulated_text = _extract_text_from_oci_content(msg.content)
 
                 # Check if text contains a tool call block (for models that return tool calls as text)
                 if accumulated_text:
@@ -561,6 +586,58 @@ RULES:
         # If no content blocks were created, add empty text block
         if not content_blocks:
             content_blocks = [{"type": "text", "text": accumulated_text or ""}]
+
+        if guardrails_config and guardrails_config.enabled and guardrails_config.output.enabled:
+            output_text = extract_text_blocks(content_blocks)
+            if output_text:
+                try:
+                    output_result = await apply_output_guardrails(
+                        client=genai_client,
+                        compartment_id=model_conf.get("compartment_id", ""),
+                        content=output_text,
+                        config=guardrails_config,
+                    )
+                    if output_result.issue_detected:
+                        summary = summarize_guardrails_result(
+                            output_result,
+                            redact_logs=guardrails_config.redact_logs,
+                        )
+                        if guardrails_config.log_details:
+                            logger.warning("Output guardrails issue detected: %s", summary)
+                        else:
+                            logger.warning(
+                                "Output guardrails issue detected: reason=%s",
+                                output_result.blocked_reason or "pii_detected",
+                            )
+                    if not output_result.passed and guardrails_config.mode == "block":
+                        return JSONResponse(
+                            status_code=guardrails_config.block_http_status,
+                            content={
+                                "type": "error",
+                                "error": {
+                                    "type": "invalid_request_error",
+                                    "message": guardrails_config.block_message,
+                                },
+                            },
+                        )
+                    if (
+                        output_result.redacted_content is not None
+                        and guardrails_config.mode == "block"
+                    ):
+                        content_blocks = replace_text_blocks(content_blocks, output_result.redacted_content)
+                except Exception:
+                    logger.exception("Output guardrails execution failed")
+                    if guardrails_config.output.fail_mode == "closed":
+                        return JSONResponse(
+                            status_code=guardrails_config.block_http_status,
+                            content={
+                                "type": "error",
+                                "error": {
+                                    "type": "invalid_request_error",
+                                    "message": guardrails_config.block_message,
+                                },
+                            },
+                        )
 
         # Estimate token usage
         text_for_estimation = ""

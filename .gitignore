@@ -26,3 +26,6 @@ debug_dumps/
 
 # Docker OCI credentials (contains sensitive keys)
 docker-oci/
+
+# Guardrails runtime data
+guardrails/blocklist.txt

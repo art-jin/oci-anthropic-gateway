@@ -4,6 +4,8 @@ This document describes the Guardrails support added to the OCI-Anthropic Gatewa
 
 ## 1. What Was Added
 
+> Concept boundary (SDK-verified): OCI Guardrails (via `ApplyGuardrails`) does **not** expose a customer-configurable blocklist/regex interface in the current OCI Python SDK (SDK API Version: 20231130). `GuardrailConfigs` only includes content moderation / prompt injection / PII configs, and `GuardrailsResults` only returns those result types. The `local_blocklist` described below is a **gateway-local** regex/substring matcher, not an OCI Guardrails feature.
+
 The gateway now supports OCI `ApplyGuardrails` in two places:
 
 1. Input Guardrails

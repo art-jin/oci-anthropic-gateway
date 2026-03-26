@@ -587,7 +587,7 @@ RULES:
         if not content_blocks:
             content_blocks = [{"type": "text", "text": accumulated_text or ""}]
 
-        if guardrails_config and guardrails_config.enabled and guardrails_config.output.enabled:
+        if guardrails_config and guardrails_config.enabled and guardrails_config.oci_native.output.enabled:
             output_text = extract_text_blocks(content_blocks)
             if output_text:
                 try:
@@ -600,41 +600,41 @@ RULES:
                     if output_result.issue_detected:
                         summary = summarize_guardrails_result(
                             output_result,
-                            redact_logs=guardrails_config.redact_logs,
+                            redact_logs=guardrails_config.gateway_policy.redact_logs,
                         )
-                        if guardrails_config.log_details:
+                        if guardrails_config.gateway_policy.log_details:
                             logger.warning("Output guardrails issue detected: %s", summary)
                         else:
                             logger.warning(
                                 "Output guardrails issue detected: reason=%s",
                                 output_result.blocked_reason or "pii_detected",
                             )
-                    if not output_result.passed and guardrails_config.mode == "block":
+                    if not output_result.passed and guardrails_config.gateway_policy.mode == "block":
                         return JSONResponse(
-                            status_code=guardrails_config.block_http_status,
+                            status_code=guardrails_config.gateway_policy.block_http_status,
                             content={
                                 "type": "error",
                                 "error": {
                                     "type": "invalid_request_error",
-                                    "message": guardrails_config.block_message,
+                                    "message": guardrails_config.gateway_policy.block_message,
                                 },
                             },
                         )
                     if (
                         output_result.redacted_content is not None
-                        and guardrails_config.mode == "block"
+                        and guardrails_config.gateway_policy.mode == "block"
                     ):
                         content_blocks = replace_text_blocks(content_blocks, output_result.redacted_content)
                 except Exception:
                     logger.exception("Output guardrails execution failed")
-                    if guardrails_config.output.fail_mode == "closed":
+                    if guardrails_config.gateway_policy.output_failure_mode == "closed":
                         return JSONResponse(
-                            status_code=guardrails_config.block_http_status,
+                            status_code=guardrails_config.gateway_policy.block_http_status,
                             content={
                                 "type": "error",
                                 "error": {
                                     "type": "invalid_request_error",
-                                    "message": guardrails_config.block_message,
+                                    "message": guardrails_config.gateway_policy.block_message,
                                 },
                             },
                         )

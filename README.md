@@ -121,13 +121,25 @@ LOG_LEVEL=DEBUG python main.py
 
 The gateway can optionally call OCI `ApplyGuardrails` before model inference and after non-streaming model responses.
 
+The configuration is intentionally split into two layers:
+
+- `guardrails.oci_native.*`: OCI-native detector configuration passed to `ApplyGuardrails`
+- `guardrails.gateway_policy.*` / `guardrails.gateway_extensions.*`: gateway-local enforcement, logging, rewrite, and streaming behavior
+
+| Layer | Config path | Role | Current capabilities |
+|-------|-------------|------|----------------------|
+| OCI-native | `guardrails.oci_native.*` | Configure OCI-native **Content Moderation**, **Prompt Injection Defense**, and **Personally Identifiable Information and Privacy Protection** detectors exposed by `ApplyGuardrails` | - Input content moderation<br>- Input prompt injection detection<br>- Input PII detection<br>- Output content moderation<br>- Output PII detection |
+| Gateway-local policy | `guardrails.gateway_policy.*` | Decide how the gateway reacts to findings or Guardrails failures | `block` / `inform`, block HTTP status, block message, detailed logging, log redaction, input failure mode, output failure mode |
+| Gateway-local extensions | `guardrails.gateway_extensions.*` | Add behavior OCI Guardrails does not provide directly. The current gateway already implements request/response collection rules, local matching, output rewrite, and stream handling; the same extension layer can also be used for future gateway-only controls that OCI does not natively expose, such as per-tenant/per-route/per-model policies, finer-grained output rewrite rules, audit/alert integrations, local custom rule engines, or multi-step approval / human-review workflows. | - Include/exclude `system`<br>- Include/exclude `tool_result`<br>- Local blocklist<br>- Output PII rewrite<br>- Stream reject/downgrade behavior |
+
 Key points:
 
-- Input guardrails support content moderation, prompt injection detection, PII detection, and an optional local blocklist.
-- Output guardrails currently support non-streaming responses only.
-- If `guardrails.output.enabled=true`, streaming requests are rejected by default, or can be downgraded to a non-streaming JSON response with `streaming_behavior: "downgrade_to_non_stream"`.
+- OCI-native input guardrails support content moderation, prompt injection detection, and PII detection.
+- OCI-native output guardrails support non-streaming responses only.
+- Gateway-local extensions include local blocklist, whether to include `system` / `tool_result` text, output PII rewrite, and stream reject/downgrade behavior.
+- If `guardrails.oci_native.output.enabled=true`, streaming requests are rejected by default, or can be downgraded to a non-streaming JSON response with `guardrails.gateway_extensions.streaming.when_output_guardrails_enabled: "downgrade_to_non_stream"`.
 - Only text content is checked. Images and video are not sent to Guardrails in this version.
-- The gateway now requires a recent OCI SDK for prompt injection support. Use `oci>=2.164.0`.
+- Prompt injection requires a recent OCI SDK. Use `oci>=2.164.0`.
 - Generic non-stream responses are normalized back to plain Anthropic text blocks; OCI `TextContent` objects are no longer leaked as JSON strings.
 
 Minimal example:
@@ -136,20 +148,30 @@ Minimal example:
 {
   "guardrails": {
     "enabled": true,
-    "mode": "block",
-    "streaming_behavior": "reject",
-    "input": {
-      "enabled": true,
-      "prompt_injection": { "enabled": true }
+    "oci_native": {
+      "input": {
+        "enabled": true,
+        "prompt_injection": { "enabled": true, "threshold": 0.95 }
+      },
+      "output": {
+        "enabled": false
+      }
     },
-    "output": {
-      "enabled": false
+    "gateway_policy": {
+      "mode": "block",
+      "input_failure_mode": "closed",
+      "output_failure_mode": "open"
+    },
+    "gateway_extensions": {
+      "streaming": {
+        "when_output_guardrails_enabled": "reject"
+      }
     }
   }
 }
 ```
 
-To enable a local blocklist, create `guardrails/blocklist.txt` from `guardrails/blocklist.txt.template`.
+To enable a gateway-local blocklist, create `guardrails/blocklist.txt` from `guardrails/blocklist.txt.template` and enable `guardrails.gateway_extensions.input.local_blocklist`.
 
 Detailed configuration, test scripts, modes, and deployment guidance are documented in [AIGUARDRAILS.md](AIGUARDRAILS.md).
 

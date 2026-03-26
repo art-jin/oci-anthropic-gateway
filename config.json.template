@@ -44,18 +44,18 @@
       "temperature": 1.0
     },
     "cohere.command-r-plus": {
-        "ocid": "ocid1.generativeaimodel.oc1...",
-        "model_types": ["text"],
-        "api_format": "cohere",
-        "max_tokens_key": "max_tokens",
-        "temperature": 0.7
+      "ocid": "ocid1.generativeaimodel.oc1...",
+      "model_types": ["text"],
+      "api_format": "cohere",
+      "max_tokens_key": "max_tokens",
+      "temperature": 0.7
     },
     "cohere.command-r": {
-        "ocid": "ocid1.generativeaimodel.oc1...",
-        "model_types": ["text"],
-        "api_format": "cohere",
-        "max_tokens_key": "max_tokens",
-        "temperature": 0.7
+      "ocid": "ocid1.generativeaimodel.oc1...",
+      "model_types": ["text"],
+      "api_format": "cohere",
+      "max_tokens_key": "max_tokens",
+      "temperature": 0.7
     },
     "google.gemini-2.5-pro": {
       "ocid": "ocid1.generativeaimodel.oc1...",
@@ -84,48 +84,65 @@
   },
   "guardrails": {
     "enabled": false,
-    "mode": "block",
-    "default_language": "en",
     "config_dir": "guardrails",
-    "block_http_status": 400,
-    "block_message": "Request blocked by guardrails policy.",
-    "streaming_behavior": "reject",
-    "log_details": false,
-    "redact_logs": true,
-    "input": {
-      "enabled": true,
-      "fail_mode": "closed",
-      "include_system": false,
-      "include_tool_results": true,
-      "content_moderation": {
+    "oci_native": {
+      "default_language": "en",
+      "input": {
         "enabled": true,
-        "categories": ["OVERALL"]
+        "content_moderation": {
+          "enabled": true,
+          "categories": ["OVERALL"],
+          "threshold": 0.5
+        },
+        "prompt_injection": {
+          "enabled": true,
+          "threshold": 0.95
+        },
+        "pii_detection": {
+          "enabled": false,
+          "types": ["EMAIL", "PERSON", "TELEPHONE_NUMBER"]
+        }
       },
-      "prompt_injection": {
-        "enabled": true,
-        "threshold": 0.95
-      },
-      "pii": {
+      "output": {
         "enabled": false,
-        "types": ["EMAIL", "PERSON", "TELEPHONE_NUMBER"]
-      },
-      "local_blocklist": {
-        "enabled": false,
-        "file": "blocklist.txt"
+        "content_moderation": {
+          "enabled": true,
+          "categories": ["OVERALL"],
+          "threshold": 0.5
+        },
+        "pii_detection": {
+          "enabled": false,
+          "types": ["EMAIL", "PERSON", "TELEPHONE_NUMBER"]
+        }
       }
     },
-    "output": {
-      "enabled": false,
-      "fail_mode": "open",
-      "content_moderation": {
-        "enabled": true,
-        "categories": ["OVERALL"]
+    "gateway_policy": {
+      "mode": "block",
+      "block_http_status": 400,
+      "block_message": "Request blocked by gateway guardrails policy.",
+      "log_details": false,
+      "redact_logs": true,
+      "input_failure_mode": "closed",
+      "output_failure_mode": "open"
+    },
+    "gateway_extensions": {
+      "input": {
+        "include_system": false,
+        "include_tool_results": true,
+        "local_blocklist": {
+          "enabled": false,
+          "file": "blocklist.txt"
+        }
       },
-      "pii": {
-        "enabled": false,
-        "types": ["EMAIL", "PERSON", "TELEPHONE_NUMBER"],
-        "action": "redact",
-        "placeholder": "[REDACTED]"
+      "output": {
+        "pii_rewrite": {
+          "enabled": false,
+          "action": "redact",
+          "placeholder": "[REDACTED]"
+        }
+      },
+      "streaming": {
+        "when_output_guardrails_enabled": "reject"
       }
     }
   },

@@ -102,14 +102,26 @@ python main.py
 
 网关现在可以选择性地在模型推理前后调用 OCI `ApplyGuardrails`。
 
+当前配置被明确拆分为两层：
+
+1. `guardrails.oci_native.*`：传给 OCI `ApplyGuardrails` 的原生检测器配置
+2. `guardrails.gateway_policy.*` / `guardrails.gateway_extensions.*`：由 gateway 本地实现的拦截、日志、重写和流式行为
+
+| 层级 | 配置路径 | 作用                                                                                                                                                                     | 当前扩展能力 |
+|---------|-------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------|
+| OCI-native | `guardrails.oci_native.*` | 配置 OCI `ApplyGuardrails` 原生提供的<br>-**Content Moderation**、<br>-**Prompt Injection Defense**、<br>-**Personally Identifiable Information and Privacy Protection** 三类检测能力 | - 输入内容审核<br>- 输入提示注入检测<br>- 输入 PII 检测<br>- 输出内容审核<br>- 输出 PII 检测 |
+| Gateway-local policy | `guardrails.gateway_policy.*` | 决定 gateway 如何处理命中结果或 Guardrails 失败                                                                                                                                     | `block` / `inform`、<br>-block HTTP status、<br>-block message、<br>-详细日志、<br>-日志脱敏、<br>-input failure mode、<br>-output failure mode |
+| Gateway-local extensions | `guardrails.gateway_extensions.*` | 补充 OCI Guardrails 本身不直接提供的能力。当前程序已经实现了:<br>-请求/响应文本收集范围控制、<br>-本地匹配、<br>-输出重写、<br>-流式处理等能力；<br>后续也可以继续在这一层扩展任何 OCI 原生未直接提供的 gateway 本地控制能力，例如：<br>-按租户/路由/模型差异化策略、<br>-更细粒度的输出重写规则、<br>-审计标记与告警集成、<br>-本地自定义规则引擎、<br>-多阶段审批或人工复核流程。 | - 是否纳入 `system`<br>- 是否纳入 `tool_result`<br>- 本地 blocklist<br>- 输出 PII rewrite<br>- 流式 reject/downgrade 行为 |
+
 当前版本说明：
 
-1. Input Guardrails 支持内容审核、提示注入检测、PII 检测，以及可选的本地 blocklist。
-2. Output Guardrails 目前只支持非流式响应。
-3. 当 `guardrails.output.enabled=true` 时，默认拒绝 `stream=true` 请求，也可以通过 `streaming_behavior: "downgrade_to_non_stream"` 降级为普通 JSON 响应。
-4. 当前版本只检查文本内容，不检查图片和视频。
-5. Prompt Injection 需要较新的 OCI SDK，当前项目要求 `oci>=2.164.0`。
-6. Generic 非流式响应已经修复为纯文本输出，不再把 OCI `TextContent` 直接透传成 JSON 字符串。
+1. OCI-native Input Guardrails 支持内容审核、提示注入检测、PII 检测。
+2. OCI-native Output Guardrails 目前只支持非流式响应。
+3. Gateway-local 扩展包括本地 blocklist、是否纳入 `system` / `tool_result` 文本、输出 PII rewrite，以及流式 reject/downgrade 行为。
+4. 当 `guardrails.oci_native.output.enabled=true` 时，默认拒绝 `stream=true` 请求，也可以通过 `guardrails.gateway_extensions.streaming.when_output_guardrails_enabled: "downgrade_to_non_stream"` 降级为普通 JSON 响应。
+5. 当前版本只检查文本内容，不检查图片和视频。
+6. Prompt Injection 需要较新的 OCI SDK，当前项目要求 `oci>=2.164.0`。
+7. Generic 非流式响应已经修复为纯文本输出，不再把 OCI `TextContent` 直接透传成 JSON 字符串。
 
 最小示例：
 
@@ -117,20 +129,30 @@ python main.py
 {
   "guardrails": {
     "enabled": true,
-    "mode": "block",
-    "streaming_behavior": "reject",
-    "input": {
-      "enabled": true,
-      "prompt_injection": { "enabled": true }
+    "oci_native": {
+      "input": {
+        "enabled": true,
+        "prompt_injection": { "enabled": true, "threshold": 0.95 }
+      },
+      "output": {
+        "enabled": false
+      }
     },
-    "output": {
-      "enabled": false
+    "gateway_policy": {
+      "mode": "block",
+      "input_failure_mode": "closed",
+      "output_failure_mode": "open"
+    },
+    "gateway_extensions": {
+      "streaming": {
+        "when_output_guardrails_enabled": "reject"
+      }
     }
   }
 }
 ```
 
-如需启用本地 blocklist，请基于 `guardrails/blocklist.txt.template` 创建 `guardrails/blocklist.txt`。
+如需启用 gateway-local blocklist，请基于 `guardrails/blocklist.txt.template` 创建 `guardrails/blocklist.txt`，并启用 `guardrails.gateway_extensions.input.local_blocklist`。
 
 更详细的 Guardrails 配置、使用方式、测试脚本和场景说明请参见 [AIGUARDRAILS.md](AIGUARDRAILS.md)。
 

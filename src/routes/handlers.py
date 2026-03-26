@@ -178,7 +178,7 @@ async def handle_messages_request(
             },
         )
 
-    if guardrails_config and guardrails_config.enabled and guardrails_config.input.enabled:
+    if guardrails_config and guardrails_config.enabled and guardrails_config.oci_native.input.enabled:
         input_text = collect_input_text_for_guardrails(body, guardrails_config)
         if input_text:
             try:
@@ -191,26 +191,26 @@ async def handle_messages_request(
                 if input_result.issue_detected:
                     summary = summarize_guardrails_result(
                         input_result,
-                        redact_logs=guardrails_config.redact_logs,
+                        redact_logs=guardrails_config.gateway_policy.redact_logs,
                     )
-                    if guardrails_config.log_details:
+                    if guardrails_config.gateway_policy.log_details:
                         logger.warning("Input guardrails issue detected: %s", summary)
                     else:
                         logger.warning(
                             "Input guardrails issue detected: reason=%s",
                             input_result.blocked_reason or "unspecified",
                         )
-                    if guardrails_config.mode == "block":
+                    if guardrails_config.gateway_policy.mode == "block":
                         return _guardrails_error_response(
-                            guardrails_config.block_message,
-                            status_code=guardrails_config.block_http_status,
+                            guardrails_config.gateway_policy.block_message,
+                            status_code=guardrails_config.gateway_policy.block_http_status,
                         )
             except Exception:
                 logger.exception("Input guardrails execution failed")
-                if guardrails_config.input.fail_mode == "closed":
+                if guardrails_config.gateway_policy.input_failure_mode == "closed":
                     return _guardrails_error_response(
-                        guardrails_config.block_message,
-                        status_code=guardrails_config.block_http_status,
+                        guardrails_config.gateway_policy.block_message,
+                        status_code=guardrails_config.gateway_policy.block_http_status,
                     )
 
     # Convert messages to OCI format
@@ -319,9 +319,9 @@ async def handle_messages_request(
         effective_stream
         and guardrails_config
         and guardrails_config.enabled
-        and guardrails_config.output.enabled
+        and guardrails_config.oci_native.output.enabled
     ):
-        if guardrails_config.streaming_behavior == "reject":
+        if guardrails_config.gateway_extensions.streaming.when_output_guardrails_enabled == "reject":
             return _guardrails_error_response(
                 "Streaming responses are not supported while output guardrails are enabled.",
                 status_code=400,

@@ -1,34 +1,38 @@
 # AI Guardrails Guide
 
-This document describes the Guardrails support added to the OCI-Anthropic Gateway, including configuration, runtime behavior, testing, scenarios, and troubleshooting.
+This document describes the Guardrails support in OCI-Anthropic Gateway, with a strict separation between:
 
-## 1. What Was Added
+1. **OCI-native Guardrails** — features provided by OCI GenAI `ApplyGuardrails`
+2. **Gateway-local Guardrails extensions** — enforcement, transport, logging, and response-rewrite behavior implemented by this gateway
 
-> Concept boundary (SDK-verified): OCI Guardrails (via `ApplyGuardrails`) does **not** expose a customer-configurable blocklist/regex interface in the current OCI Python SDK (SDK API Version: 20231130). `GuardrailConfigs` only includes content moderation / prompt injection / PII configs, and `GuardrailsResults` only returns those result types. The `local_blocklist` described below is a **gateway-local** regex/substring matcher, not an OCI Guardrails feature.
+## 1. Capability Boundary
 
-The gateway now supports OCI `ApplyGuardrails` in two places:
+### 1.1 OCI-native Guardrails
 
-1. Input Guardrails
-   - Runs before the request is sent to OCI chat inference
-   - Supports content moderation
-   - Supports prompt injection detection
-   - Supports PII detection
-   - Supports an optional local blocklist
+The OCI Python SDK `ApplyGuardrails` API currently exposes these detector families:
 
-2. Output Guardrails
-   - Runs after OCI returns a non-streaming response
-   - Supports content moderation
-   - Supports PII detection
-   - Supports text redaction or masking
+1. Content moderation
+2. Prompt injection detection
+3. PII detection
 
-Current scope:
+In this project, those map to:
 
-1. Only text content is checked
-2. Images and video are not sent to Guardrails in this version
-3. Output Guardrails apply only to non-streaming responses
-4. When output guardrails are enabled, streaming requests can either:
-   - be rejected
-   - or be downgraded to non-streaming JSON
+- `guardrails.oci_native.input.content_moderation`
+- `guardrails.oci_native.input.prompt_injection`
+- `guardrails.oci_native.input.pii_detection`
+- `guardrails.oci_native.output.content_moderation`
+- `guardrails.oci_native.output.pii_detection`
+
+### 1.2 Gateway-local Guardrails extensions
+
+The following are **not** OCI-native Guardrails features. They are implemented by this gateway:
+
+| Layer | Config path | Role | Current capabilities |
+|-------|-------------|------|----------------------|
+| Gateway-local policy | `guardrails.gateway_policy.*` | Decide how the gateway reacts to findings or Guardrails failures | - `mode`<br>- `block_http_status`<br>- `block_message`<br>- `log_details`<br>- `redact_logs`<br>- `input_failure_mode`<br>- `output_failure_mode` |
+| Gateway-local extensions | `guardrails.gateway_extensions.*` | Add behavior OCI Guardrails does not provide directly. The current gateway already implements request/response collection rules, local matching, output rewrite, and stream handling; the same extension layer can also be used for future gateway-only controls that OCI does not natively expose, such as per-tenant/per-route/per-model policies, finer-grained output rewrite rules, audit/alert integrations, local custom rule engines, or multi-step approval / human-review workflows. | - Include/exclude `system`<br>- Include/exclude `tool_result`<br>- Local blocklist<br>- Output PII rewrite<br>- Stream reject/downgrade behavior |
+
+> Important: OCI Guardrails does **not** expose a customer-configurable blocklist/regex interface in the current OCI Python SDK. `local_blocklist` is a gateway-local matcher, not an OCI Guardrails feature.
 
 ## 2. SDK Requirement
 
@@ -43,7 +47,7 @@ oci>=2.164.0
 Why this matters:
 
 1. Older SDK versions do not expose `PromptInjectionConfiguration`
-2. If the runtime uses an older SDK, input prompt injection checks will fail
+2. If the runtime uses an older SDK, OCI-native prompt injection checks will fail
 
 Recommended check:
 
@@ -63,73 +67,7 @@ Expected result:
 True
 ```
 
-## 3. Files Changed
-
-Core code:
-
-1. `src/utils/guardrails.py`
-2. `src/config/__init__.py`
-3. `src/routes/handlers.py`
-4. `src/services/generation.py`
-
-Config and templates:
-
-1. `config.json.template`
-2. `guardrails/blocklist.txt.template`
-3. `.gitignore`
-
-Tests:
-
-1. `test/test_guardrails.py`
-2. `test/08_guardrails_input_block.py`
-3. `test/09_guardrails_output_redact.py`
-4. `test/10_guardrails_stream_downgrade.py`
-
-## 4. Request Flow
-
-### 4.1 Input Flow
-
-1. Request arrives at `src/routes/handlers.py`
-2. Request payload is validated
-3. Model routing is resolved
-4. Input text is collected for guardrails
-5. OCI `ApplyGuardrails` is called
-6. If blocked:
-   - return HTTP error in `block` mode
-   - only log in `inform` mode
-7. If allowed:
-   - continue with OCI chat inference
-
-Input coverage:
-
-1. User text
-2. Optional system text
-3. Tool result text if `include_tool_results=true`
-
-### 4.2 Output Flow
-
-1. Non-streaming OCI response is received in `src/services/generation.py`
-2. Text blocks are extracted
-3. OCI `ApplyGuardrails` is called for output
-4. If output moderation is triggered in `block` mode:
-   - return an Anthropic-style error response
-5. If output PII is detected and `action=redact` or `mask`:
-   - rewrite only text blocks
-6. Return Anthropic-compatible JSON
-
-### 4.3 Streaming Flow
-
-If `guardrails.output.enabled=true` and a request uses `stream=true`, the gateway applies `streaming_behavior`:
-
-1. `reject`
-   - return 400
-
-2. `downgrade_to_non_stream`
-   - run the request through the non-stream path
-   - return `application/json`
-   - add `metadata.guardrails_stream_downgraded=true`
-
-## 5. Configuration Reference
+## 3. Configuration Schema
 
 Example:
 
@@ -137,122 +75,197 @@ Example:
 {
   "guardrails": {
     "enabled": true,
-    "mode": "block",
-    "default_language": "en",
     "config_dir": "guardrails",
-    "block_http_status": 400,
-    "block_message": "Request blocked by guardrails policy.",
-    "streaming_behavior": "downgrade_to_non_stream",
-    "log_details": true,
-    "redact_logs": true,
-    "input": {
-      "enabled": true,
-      "fail_mode": "closed",
-      "include_system": false,
-      "include_tool_results": true,
-      "content_moderation": {
-        "enabled": false,
-        "categories": ["OVERALL"]
-      },
-      "prompt_injection": {
+    "oci_native": {
+      "default_language": "en",
+      "input": {
         "enabled": true,
-        "threshold": 0.95
+        "content_moderation": {
+          "enabled": true,
+          "categories": ["OVERALL"],
+          "threshold": 0.5
+        },
+        "prompt_injection": {
+          "enabled": true,
+          "threshold": 0.95
+        },
+        "pii_detection": {
+          "enabled": false,
+          "types": ["EMAIL"]
+        }
       },
-      "pii": {
-        "enabled": false,
-        "types": ["EMAIL"]
-      },
-      "local_blocklist": {
-        "enabled": false,
-        "file": "blocklist.txt"
+      "output": {
+        "enabled": true,
+        "content_moderation": {
+          "enabled": false,
+          "categories": ["OVERALL"],
+          "threshold": 0.5
+        },
+        "pii_detection": {
+          "enabled": true,
+          "types": ["EMAIL"]
+        }
       }
     },
-    "output": {
-      "enabled": true,
-      "fail_mode": "open",
-      "content_moderation": {
-        "enabled": false,
-        "categories": ["OVERALL"]
+    "gateway_policy": {
+      "mode": "block",
+      "block_http_status": 400,
+      "block_message": "Request blocked by gateway guardrails policy.",
+      "log_details": true,
+      "redact_logs": true,
+      "input_failure_mode": "closed",
+      "output_failure_mode": "open"
+    },
+    "gateway_extensions": {
+      "input": {
+        "include_system": false,
+        "include_tool_results": true,
+        "local_blocklist": {
+          "enabled": false,
+          "file": "blocklist.txt"
+        }
       },
-      "pii": {
-        "enabled": true,
-        "types": ["EMAIL"],
-        "action": "redact",
-        "placeholder": "[REDACTED]"
+      "output": {
+        "pii_rewrite": {
+          "enabled": true,
+          "action": "redact",
+          "placeholder": "[REDACTED]"
+        }
+      },
+      "streaming": {
+        "when_output_guardrails_enabled": "downgrade_to_non_stream"
       }
     }
   }
 }
 ```
 
-### 5.1 Top-Level Fields
+## 4. Configuration Reference
 
+### 4.1 Top-level
+
+1. `guardrails.enabled`
+   - master switch for all guardrails behavior
+
+2. `guardrails.config_dir`
+   - directory used for runtime files such as local blocklist
+   - resolved relative to `config.json`
+
+### 4.2 OCI-native Guardrails
+
+#### `guardrails.oci_native.default_language`
+- passed into OCI `ApplyGuardrails`
+
+#### `guardrails.oci_native.input`
 1. `enabled`
-   - Master switch
+2. `content_moderation.enabled`
+3. `content_moderation.categories`
+4. `content_moderation.threshold`
+5. `prompt_injection.enabled`
+6. `prompt_injection.threshold`
+7. `pii_detection.enabled`
+8. `pii_detection.types`
 
-2. `mode`
+#### `guardrails.oci_native.output`
+1. `enabled`
+2. `content_moderation.enabled`
+3. `content_moderation.categories`
+4. `content_moderation.threshold`
+5. `pii_detection.enabled`
+6. `pii_detection.types`
+
+### 4.3 Gateway policy
+
+#### `guardrails.gateway_policy`
+1. `mode`
    - `block`
    - `inform`
 
-3. `default_language`
-   - Passed into OCI Guardrails
+2. `block_http_status`
+   - HTTP status returned when the gateway blocks a request/response
 
-4. `config_dir`
-   - Directory used for runtime files such as blocklist
-   - Resolved relative to `config.json`
+3. `block_message`
+   - safe message returned by the gateway
 
-5. `block_http_status`
-   - HTTP status returned when blocked
+4. `log_details`
+   - whether to log detailed guardrails summaries
 
-6. `block_message`
-   - Safe message returned to the client
+5. `redact_logs`
+   - whether to remove sensitive text from summaries
 
-7. `streaming_behavior`
-   - `reject`
-   - `downgrade_to_non_stream`
-
-8. `log_details`
-   - Whether to log guardrails summaries
-
-9. `redact_logs`
-   - Whether to remove sensitive text from log summaries
-
-### 5.2 Input Fields
-
-1. `enabled`
-2. `fail_mode`
+6. `input_failure_mode`
    - `open`
    - `closed`
-3. `include_system`
-4. `include_tool_results`
-5. `content_moderation.enabled`
-6. `content_moderation.categories`
-7. `content_moderation.threshold`
-8. `prompt_injection.enabled`
-9. `prompt_injection.threshold`
-10. `pii.enabled`
-11. `pii.types`
-12. `local_blocklist.enabled`
-13. `local_blocklist.file`
 
-### 5.3 Output Fields
+7. `output_failure_mode`
+   - `open`
+   - `closed`
 
+### 4.4 Gateway extensions
+
+#### `guardrails.gateway_extensions.input`
+1. `include_system`
+2. `include_tool_results`
+3. `local_blocklist.enabled`
+4. `local_blocklist.file`
+
+#### `guardrails.gateway_extensions.output.pii_rewrite`
 1. `enabled`
-2. `fail_mode`
-3. `content_moderation.enabled`
-4. `content_moderation.categories`
-5. `content_moderation.threshold`
-6. `pii.enabled`
-7. `pii.types`
-8. `pii.action`
-   - `none`
+2. `action`
    - `redact`
    - `mask`
-9. `pii.placeholder`
+3. `placeholder`
+
+#### `guardrails.gateway_extensions.streaming.when_output_guardrails_enabled`
+1. `reject`
+2. `downgrade_to_non_stream`
+
+## 5. Request Flow
+
+### 5.1 Input flow
+
+1. Request arrives at `src/routes/handlers.py`
+2. Request payload is validated
+3. Model routing is resolved
+4. Gateway-local input collection runs
+   - user text is always included
+   - system text is included only if `gateway_extensions.input.include_system=true`
+   - tool result text is included only if `gateway_extensions.input.include_tool_results=true`
+5. Gateway-local blocklist runs if enabled
+6. OCI-native `ApplyGuardrails` runs using `guardrails.oci_native.input.*`
+7. Gateway policy decides whether to:
+   - block (`gateway_policy.mode=block`)
+   - or only log (`gateway_policy.mode=inform`)
+8. If allowed, request continues to OCI chat inference
+
+### 5.2 Output flow
+
+1. Non-streaming OCI response is received in `src/services/generation.py`
+2. Text blocks are extracted
+3. OCI-native `ApplyGuardrails` runs using `guardrails.oci_native.output.*`
+4. Gateway policy decides whether moderation findings should block the response
+5. If OCI-native output PII detection returns entities and `gateway_extensions.output.pii_rewrite.enabled=true`, the gateway rewrites only text blocks
+6. Anthropic-compatible JSON is returned
+
+### 5.3 Streaming flow
+
+If `guardrails.oci_native.output.enabled=true` and a request uses `stream=true`, the gateway uses:
+
+- `guardrails.gateway_extensions.streaming.when_output_guardrails_enabled`
+
+Options:
+
+1. `reject`
+   - return 400
+
+2. `downgrade_to_non_stream`
+   - route through the non-stream path
+   - return `application/json`
+   - add `metadata.guardrails_stream_downgraded=true`
 
 ## 6. Prompt Injection Threshold
 
-`prompt_injection.threshold` defines the score threshold used to decide whether OCI's prompt injection score counts as a hit.
+`guardrails.oci_native.input.prompt_injection.threshold` defines the score threshold used by the gateway to interpret OCI's prompt injection score.
 
 Current rule:
 
@@ -282,14 +295,14 @@ Examples:
 
 Recommended rollout:
 
-1. Start with `mode="inform"`
+1. Start with `gateway_policy.mode="inform"`
 2. Observe scores in logs
 3. Choose a threshold
 4. Switch to `block`
 
 ## 7. Local Blocklist
 
-To enable a local blocklist:
+To enable the gateway-local blocklist:
 
 1. Copy the template
 
@@ -309,10 +322,12 @@ regex:\b\d{4}-\d{4}-\d{4}-\d{4}\b
 ```json
 {
   "guardrails": {
-    "input": {
-      "local_blocklist": {
-        "enabled": true,
-        "file": "blocklist.txt"
+    "gateway_extensions": {
+      "input": {
+        "local_blocklist": {
+          "enabled": true,
+          "file": "blocklist.txt"
+        }
       }
     }
   }
@@ -325,32 +340,34 @@ Behavior:
 2. `regex:` entries are interpreted as regular expressions
 3. If the file is missing, the gateway logs a warning
 
-## 8. Output Text Normalization
+## 8. Output Text Rewrite
 
-During this work, one response formatting bug was fixed:
+Gateway output rewrite is separate from OCI-native PII detection.
 
-Problem:
+Flow:
 
-1. OCI Generic non-stream responses can contain SDK `TextContent` objects
-2. If these objects are converted with `str(...)`, they become JSON-looking text such as:
+1. OCI-native output PII detection identifies entities
+2. The gateway receives offsets/lengths from OCI results
+3. If `gateway_extensions.output.pii_rewrite.enabled=true`, the gateway rewrites Anthropic text blocks
 
-```json
-{"text":"Hi","type":"TEXT"}
-```
+This means:
 
-Fix:
+- PII detection is OCI-native
+- redaction/masking of Anthropic response text is gateway-local
 
-1. The gateway now extracts `.text` from OCI SDK objects
-2. Anthropic clients now receive plain text again
+## 9. Output Text Normalization
+
+OCI Generic non-stream responses can contain SDK `TextContent` objects.
+The gateway extracts `.text` so Anthropic clients receive plain text instead of OCI object dumps.
 
 This matters because:
 
 1. Anthropic clients expect text content blocks, not OCI object dumps
-2. Guardrails output rewriting should operate on plain text
+2. Gateway-local output rewrite operates on plain text blocks
 
-## 9. Test Scripts
+## 10. Test Scripts
 
-### 9.1 Unit Tests
+### 10.1 Unit tests
 
 Run:
 
@@ -361,14 +378,14 @@ pytest -q test/test_guardrails.py
 Covers:
 
 1. Input text extraction
-2. Blocklist matching
-3. PII redaction
+2. Gateway-local blocklist matching
+3. Gateway-local PII rewrite
 4. Path resolution
 5. Stream downgrade routing
 6. Output redaction integration
 7. OCI `TextContent` plain-text extraction
 
-### 9.2 End-to-End Scripts
+### 10.2 End-to-end scripts
 
 Run from repo root:
 
@@ -383,14 +400,14 @@ These use:
 1. `GATEWAY_BASE_URL`, default `http://localhost:8000`
 2. `GATEWAY_MODEL`, default `default_model` from `config.json`
 
-### 9.3 What Each Script Verifies
+### 10.3 What each script verifies
 
 1. `08_guardrails_input_block.py`
    - sends a prompt injection-style request
    - expects a 400 block
 
 2. `09_guardrails_output_redact.py`
-   - exercises output PII redaction
+   - exercises OCI-native output PII detection plus gateway-local output rewrite
    - expects the response body to contain `[REDACTED]`
 
 3. `10_guardrails_stream_downgrade.py`
@@ -398,63 +415,64 @@ These use:
    - expects a downgraded `application/json` response
    - expects `metadata.guardrails_stream_downgraded=true`
 
-## 10. Recommended Scenarios
+## 11. Recommended Scenarios
 
-### 10.1 Safe Rollout
+### 11.1 Safe rollout
 
 Use:
 
-1. `mode = "inform"`
-2. `input.prompt_injection.enabled = true`
+1. `gateway_policy.mode = "inform"`
+2. `oci_native.input.prompt_injection.enabled = true`
 3. high threshold such as `0.9` or `0.95`
-4. `output.enabled = false`
+4. `oci_native.output.enabled = false`
 
 Purpose:
 
 1. learn the score distribution
 2. avoid blocking production traffic too early
 
-### 10.2 Input-First Protection
+### 11.2 Input-first protection
 
 Use:
 
-1. `mode = "block"`
-2. `input.prompt_injection.enabled = true`
-3. `input.fail_mode = "closed"`
-4. `output.enabled = false`
+1. `gateway_policy.mode = "block"`
+2. `oci_native.input.prompt_injection.enabled = true`
+3. `gateway_policy.input_failure_mode = "closed"`
+4. `oci_native.output.enabled = false`
 
 Purpose:
 
 1. protect the model from dangerous inputs
 2. keep output flow simple
 
-### 10.3 Output PII Protection
+### 11.3 Output PII protection
 
 Use:
 
-1. `output.enabled = true`
-2. `output.pii.enabled = true`
-3. `output.pii.action = "redact"`
-4. `streaming_behavior = "downgrade_to_non_stream"`
+1. `oci_native.output.enabled = true`
+2. `oci_native.output.pii_detection.enabled = true`
+3. `gateway_extensions.output.pii_rewrite.enabled = true`
+4. `gateway_extensions.output.pii_rewrite.action = "redact"`
+5. `gateway_extensions.streaming.when_output_guardrails_enabled = "downgrade_to_non_stream"`
 
 Purpose:
 
 1. prevent email or contact details from leaving the gateway
 
-### 10.4 Tool-Rich Workflows
+### 11.4 Tool-rich workflows
 
 Keep:
 
-1. `input.include_tool_results = true`
+1. `gateway_extensions.input.include_tool_results = true`
 
 Reason:
 
 1. external tool output is a prompt-injection risk
 2. tool results are passed back into later model turns
 
-## 11. Common Problems
+## 12. Common Problems
 
-### 11.1 `PromptInjectionConfiguration` AttributeError
+### 12.1 `PromptInjectionConfiguration` AttributeError
 
 Symptom:
 
@@ -474,19 +492,19 @@ Fix:
 
 Then restart the gateway.
 
-### 11.2 Output Tests Keep Returning 400
+### 12.2 Output tests keep returning 400
 
 Cause:
 
-1. input prompt injection blocks the test request before output guardrails run
+1. OCI-native input prompt injection blocks the test request before output guardrails run
 
 Fix options:
 
-1. temporarily set `mode="inform"`
-2. temporarily disable `input.prompt_injection.enabled`
-3. raise `input.prompt_injection.threshold`
+1. temporarily set `gateway_policy.mode="inform"`
+2. temporarily disable `oci_native.input.prompt_injection.enabled`
+3. raise `oci_native.input.prompt_injection.threshold`
 
-### 11.3 Anthropic Client Receives JSON-Looking Text
+### 12.3 Anthropic client receives JSON-looking text
 
 Symptom:
 
@@ -505,26 +523,26 @@ Fix:
 
 1. restart the gateway after updating code
 
-### 11.4 Stream Request No Longer Returns SSE
+### 12.4 Stream request no longer returns SSE
 
 Cause:
 
-1. `guardrails.output.enabled=true`
-2. `streaming_behavior="downgrade_to_non_stream"`
+1. `guardrails.oci_native.output.enabled=true`
+2. `guardrails.gateway_extensions.streaming.when_output_guardrails_enabled="downgrade_to_non_stream"`
 
 This is expected.
 
-## 12. Operational Notes
+## 13. Operational Notes
 
-1. Keep `redact_logs=true` in production
-2. Prefer `fail_mode=closed` for input, `fail_mode=open` for output
+1. Keep `gateway_policy.redact_logs=true` in production
+2. Prefer `gateway_policy.input_failure_mode=closed` for input and `gateway_policy.output_failure_mode=open` for output
 3. Validate behavior with `08/09/10` after any config change
 4. If you change SDK versions, verify the runtime interpreter and virtualenv match
 
-## 13. Quick Checklist
+## 14. Quick Checklist
 
 1. OCI SDK upgraded
-2. `config.json` updated
+2. `config.json` updated to the new schema
 3. `guardrails/blocklist.txt` created if needed
 4. gateway restarted
 5. `08/09/10` executed

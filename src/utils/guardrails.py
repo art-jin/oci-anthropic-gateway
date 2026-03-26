@@ -15,7 +15,7 @@ import oci
 logger = logging.getLogger("oci-gateway")
 
 DEFAULT_SCORE_THRESHOLD = 0.5
-DEFAULT_BLOCK_MESSAGE = "Request blocked by guardrails policy."
+DEFAULT_BLOCK_MESSAGE = "Request blocked by gateway guardrails policy."
 
 
 class GuardrailsSdkCompatibilityError(RuntimeError):
@@ -57,25 +57,30 @@ def _as_list_of_str(value: Any, default: Sequence[str]) -> List[str]:
     return out
 
 
+def _validate_threshold(value: Any, field_name: str) -> float:
+    threshold = float(value)
+    if threshold < 0.0 or threshold > 1.0:
+        raise ValueError(f"Invalid guardrails.{field_name} in config.json (must be between 0.0 and 1.0)")
+    return threshold
+
+
 @dataclass
-class ContentModerationConfig:
+class OciContentModerationConfig:
     enabled: bool = True
     categories: List[str] = field(default_factory=lambda: ["OVERALL"])
     threshold: float = DEFAULT_SCORE_THRESHOLD
 
 
 @dataclass
-class PromptInjectionConfig:
+class OciPromptInjectionConfig:
     enabled: bool = True
     threshold: float = DEFAULT_SCORE_THRESHOLD
 
 
 @dataclass
-class PIIConfig:
+class OciPIIDetectionConfig:
     enabled: bool = False
     types: List[str] = field(default_factory=list)
-    action: str = "none"
-    placeholder: str = "[REDACTED]"
 
 
 @dataclass
@@ -87,23 +92,67 @@ class LocalBlocklistConfig:
 
 
 @dataclass
-class InputGuardrailsConfig:
+class GatewayPIIRewriteConfig:
+    enabled: bool = False
+    action: str = "redact"
+    placeholder: str = "[REDACTED]"
+
+
+@dataclass
+class OciNativeInputGuardrailsConfig:
     enabled: bool = True
-    fail_mode: str = "closed"
+    content_moderation: OciContentModerationConfig = field(default_factory=OciContentModerationConfig)
+    prompt_injection: OciPromptInjectionConfig = field(default_factory=OciPromptInjectionConfig)
+    pii_detection: OciPIIDetectionConfig = field(default_factory=OciPIIDetectionConfig)
+
+
+@dataclass
+class OciNativeOutputGuardrailsConfig:
+    enabled: bool = False
+    content_moderation: OciContentModerationConfig = field(default_factory=OciContentModerationConfig)
+    pii_detection: OciPIIDetectionConfig = field(default_factory=OciPIIDetectionConfig)
+
+
+@dataclass
+class OciNativeGuardrailsConfig:
+    default_language: str = "en"
+    input: OciNativeInputGuardrailsConfig = field(default_factory=OciNativeInputGuardrailsConfig)
+    output: OciNativeOutputGuardrailsConfig = field(default_factory=OciNativeOutputGuardrailsConfig)
+
+
+@dataclass
+class GatewayGuardrailsPolicyConfig:
+    mode: str = "block"
+    block_http_status: int = 400
+    block_message: str = DEFAULT_BLOCK_MESSAGE
+    log_details: bool = False
+    redact_logs: bool = True
+    input_failure_mode: str = "closed"
+    output_failure_mode: str = "open"
+
+
+@dataclass
+class GatewayInputExtensionsConfig:
     include_system: bool = False
     include_tool_results: bool = True
-    content_moderation: ContentModerationConfig = field(default_factory=ContentModerationConfig)
-    prompt_injection: PromptInjectionConfig = field(default_factory=PromptInjectionConfig)
-    pii: PIIConfig = field(default_factory=PIIConfig)
     local_blocklist: LocalBlocklistConfig = field(default_factory=LocalBlocklistConfig)
 
 
 @dataclass
-class OutputGuardrailsConfig:
-    enabled: bool = False
-    fail_mode: str = "open"
-    content_moderation: ContentModerationConfig = field(default_factory=ContentModerationConfig)
-    pii: PIIConfig = field(default_factory=PIIConfig)
+class GatewayOutputExtensionsConfig:
+    pii_rewrite: GatewayPIIRewriteConfig = field(default_factory=GatewayPIIRewriteConfig)
+
+
+@dataclass
+class GatewayStreamingExtensionsConfig:
+    when_output_guardrails_enabled: str = "reject"
+
+
+@dataclass
+class GatewayGuardrailsExtensionsConfig:
+    input: GatewayInputExtensionsConfig = field(default_factory=GatewayInputExtensionsConfig)
+    output: GatewayOutputExtensionsConfig = field(default_factory=GatewayOutputExtensionsConfig)
+    streaming: GatewayStreamingExtensionsConfig = field(default_factory=GatewayStreamingExtensionsConfig)
 
 
 @dataclass
@@ -139,16 +188,10 @@ class GuardrailsCheckResult:
 @dataclass
 class GuardrailsConfig:
     enabled: bool = False
-    mode: str = "block"
-    default_language: str = "en"
     config_dir: Path = Path("guardrails")
-    block_http_status: int = 400
-    block_message: str = DEFAULT_BLOCK_MESSAGE
-    streaming_behavior: str = "reject"
-    log_details: bool = False
-    redact_logs: bool = True
-    input: InputGuardrailsConfig = field(default_factory=InputGuardrailsConfig)
-    output: OutputGuardrailsConfig = field(default_factory=OutputGuardrailsConfig)
+    oci_native: OciNativeGuardrailsConfig = field(default_factory=OciNativeGuardrailsConfig)
+    gateway_policy: GatewayGuardrailsPolicyConfig = field(default_factory=GatewayGuardrailsPolicyConfig)
+    gateway_extensions: GatewayGuardrailsExtensionsConfig = field(default_factory=GatewayGuardrailsExtensionsConfig)
 
 
 def _validate_guardrails_enum(value: str, allowed: Set[str], field_name: str) -> str:
@@ -158,31 +201,38 @@ def _validate_guardrails_enum(value: str, allowed: Set[str], field_name: str) ->
     return normalized
 
 
-def _parse_content_moderation_config(raw: Dict[str, Any], *, enabled_default: bool) -> ContentModerationConfig:
+def _parse_content_moderation_config(raw: Dict[str, Any], *, enabled_default: bool, field_prefix: str) -> OciContentModerationConfig:
     raw = raw or {}
-    return ContentModerationConfig(
+    return OciContentModerationConfig(
         enabled=_as_bool(raw.get("enabled"), enabled_default),
         categories=_as_list_of_str(raw.get("categories"), ["OVERALL"]),
-        threshold=float(raw.get("threshold", DEFAULT_SCORE_THRESHOLD)),
+        threshold=_validate_threshold(raw.get("threshold", DEFAULT_SCORE_THRESHOLD), f"{field_prefix}.threshold"),
     )
 
 
-def _parse_prompt_injection_config(raw: Dict[str, Any], *, enabled_default: bool) -> PromptInjectionConfig:
+def _parse_prompt_injection_config(raw: Dict[str, Any], *, enabled_default: bool, field_prefix: str) -> OciPromptInjectionConfig:
     raw = raw or {}
-    return PromptInjectionConfig(
+    return OciPromptInjectionConfig(
         enabled=_as_bool(raw.get("enabled"), enabled_default),
-        threshold=float(raw.get("threshold", DEFAULT_SCORE_THRESHOLD)),
+        threshold=_validate_threshold(raw.get("threshold", DEFAULT_SCORE_THRESHOLD), f"{field_prefix}.threshold"),
     )
 
 
-def _parse_pii_config(raw: Dict[str, Any], *, enabled_default: bool, action_default: str) -> PIIConfig:
+def _parse_pii_detection_config(raw: Dict[str, Any], *, enabled_default: bool) -> OciPIIDetectionConfig:
     raw = raw or {}
-    action = _as_str(raw.get("action"), action_default).lower()
-    if action not in {"none", "redact", "mask"}:
-        raise ValueError("Invalid guardrails pii.action in config.json (allowed: none,redact,mask)")
-    return PIIConfig(
+    return OciPIIDetectionConfig(
         enabled=_as_bool(raw.get("enabled"), enabled_default),
         types=_as_list_of_str(raw.get("types"), []),
+    )
+
+
+def _parse_pii_rewrite_config(raw: Dict[str, Any]) -> GatewayPIIRewriteConfig:
+    raw = raw or {}
+    action = _as_str(raw.get("action"), "redact").lower()
+    if action not in {"redact", "mask"}:
+        raise ValueError("Invalid guardrails.gateway_extensions.output.pii_rewrite.action in config.json (allowed: redact,mask)")
+    return GatewayPIIRewriteConfig(
+        enabled=_as_bool(raw.get("enabled"), False),
         action=action,
         placeholder=_as_str(raw.get("placeholder"), "[REDACTED]"),
     )
@@ -211,67 +261,104 @@ def build_guardrails_config(raw: Dict[str, Any], *, config_file_path: str) -> Gu
     config_base_dir = Path(config_file_path).resolve().parent
     config_dir = config_base_dir / _as_str(raw.get("config_dir"), "guardrails")
 
-    mode = _validate_guardrails_enum(_as_str(raw.get("mode"), "block").lower(), {"block", "inform"}, "mode")
+    oci_native_raw = raw.get("oci_native", {}) or {}
+    gateway_policy_raw = raw.get("gateway_policy", {}) or {}
+    gateway_extensions_raw = raw.get("gateway_extensions", {}) or {}
+
+    oci_input_raw = oci_native_raw.get("input", {}) or {}
+    oci_output_raw = oci_native_raw.get("output", {}) or {}
+    gateway_input_raw = gateway_extensions_raw.get("input", {}) or {}
+    gateway_output_raw = gateway_extensions_raw.get("output", {}) or {}
+    gateway_streaming_raw = gateway_extensions_raw.get("streaming", {}) or {}
+
+    mode = _validate_guardrails_enum(
+        _as_str(gateway_policy_raw.get("mode"), "block").lower(),
+        {"block", "inform"},
+        "gateway_policy.mode",
+    )
+    input_failure_mode = _validate_guardrails_enum(
+        _as_str(gateway_policy_raw.get("input_failure_mode"), "closed").lower(),
+        {"open", "closed"},
+        "gateway_policy.input_failure_mode",
+    )
+    output_failure_mode = _validate_guardrails_enum(
+        _as_str(gateway_policy_raw.get("output_failure_mode"), "open").lower(),
+        {"open", "closed"},
+        "gateway_policy.output_failure_mode",
+    )
     streaming_behavior = _validate_guardrails_enum(
-        _as_str(raw.get("streaming_behavior"), "reject").lower(),
+        _as_str(gateway_streaming_raw.get("when_output_guardrails_enabled"), "reject").lower(),
         {"reject", "downgrade_to_non_stream"},
-        "streaming_behavior",
+        "gateway_extensions.streaming.when_output_guardrails_enabled",
     )
 
-    block_http_status = int(raw.get("block_http_status", 400))
+    block_http_status = int(gateway_policy_raw.get("block_http_status", 400))
     if block_http_status < 100 or block_http_status > 599:
-        raise ValueError("Invalid guardrails.block_http_status in config.json")
+        raise ValueError("Invalid guardrails.gateway_policy.block_http_status in config.json")
 
-    input_raw = raw.get("input", {}) or {}
-    output_raw = raw.get("output", {}) or {}
-
-    input_fail_mode = _validate_guardrails_enum(
-        _as_str(input_raw.get("fail_mode"), "closed").lower(),
-        {"open", "closed"},
-        "input.fail_mode",
-    )
-    output_fail_mode = _validate_guardrails_enum(
-        _as_str(output_raw.get("fail_mode"), "open").lower(),
-        {"open", "closed"},
-        "output.fail_mode",
-    )
-
-    input_config = InputGuardrailsConfig(
-        enabled=_as_bool(input_raw.get("enabled"), True),
-        fail_mode=input_fail_mode,
-        include_system=_as_bool(input_raw.get("include_system"), False),
-        include_tool_results=_as_bool(input_raw.get("include_tool_results"), True),
-        content_moderation=_parse_content_moderation_config(
-            input_raw.get("content_moderation", {}), enabled_default=True
+    oci_native = OciNativeGuardrailsConfig(
+        default_language=_as_str(oci_native_raw.get("default_language"), "en"),
+        input=OciNativeInputGuardrailsConfig(
+            enabled=_as_bool(oci_input_raw.get("enabled"), True),
+            content_moderation=_parse_content_moderation_config(
+                oci_input_raw.get("content_moderation", {}),
+                enabled_default=True,
+                field_prefix="oci_native.input.content_moderation",
+            ),
+            prompt_injection=_parse_prompt_injection_config(
+                oci_input_raw.get("prompt_injection", {}),
+                enabled_default=True,
+                field_prefix="oci_native.input.prompt_injection",
+            ),
+            pii_detection=_parse_pii_detection_config(
+                oci_input_raw.get("pii_detection", {}),
+                enabled_default=False,
+            ),
         ),
-        prompt_injection=_parse_prompt_injection_config(
-            input_raw.get("prompt_injection", {}), enabled_default=True
+        output=OciNativeOutputGuardrailsConfig(
+            enabled=_as_bool(oci_output_raw.get("enabled"), False),
+            content_moderation=_parse_content_moderation_config(
+                oci_output_raw.get("content_moderation", {}),
+                enabled_default=True,
+                field_prefix="oci_native.output.content_moderation",
+            ),
+            pii_detection=_parse_pii_detection_config(
+                oci_output_raw.get("pii_detection", {}),
+                enabled_default=False,
+            ),
         ),
-        pii=_parse_pii_config(input_raw.get("pii", {}), enabled_default=False, action_default="none"),
-        local_blocklist=_parse_local_blocklist_config(input_raw.get("local_blocklist", {}), config_dir),
     )
 
-    output_config = OutputGuardrailsConfig(
-        enabled=_as_bool(output_raw.get("enabled"), False),
-        fail_mode=output_fail_mode,
-        content_moderation=_parse_content_moderation_config(
-            output_raw.get("content_moderation", {}), enabled_default=True
+    gateway_policy = GatewayGuardrailsPolicyConfig(
+        mode=mode,
+        block_http_status=block_http_status,
+        block_message=_as_str(gateway_policy_raw.get("block_message"), DEFAULT_BLOCK_MESSAGE),
+        log_details=_as_bool(gateway_policy_raw.get("log_details"), False),
+        redact_logs=_as_bool(gateway_policy_raw.get("redact_logs"), True),
+        input_failure_mode=input_failure_mode,
+        output_failure_mode=output_failure_mode,
+    )
+
+    gateway_extensions = GatewayGuardrailsExtensionsConfig(
+        input=GatewayInputExtensionsConfig(
+            include_system=_as_bool(gateway_input_raw.get("include_system"), False),
+            include_tool_results=_as_bool(gateway_input_raw.get("include_tool_results"), True),
+            local_blocklist=_parse_local_blocklist_config(gateway_input_raw.get("local_blocklist", {}), config_dir),
         ),
-        pii=_parse_pii_config(output_raw.get("pii", {}), enabled_default=False, action_default="redact"),
+        output=GatewayOutputExtensionsConfig(
+            pii_rewrite=_parse_pii_rewrite_config(gateway_output_raw.get("pii_rewrite", {})),
+        ),
+        streaming=GatewayStreamingExtensionsConfig(
+            when_output_guardrails_enabled=streaming_behavior,
+        ),
     )
 
     return GuardrailsConfig(
         enabled=_as_bool(raw.get("enabled"), False),
-        mode=mode,
-        default_language=_as_str(raw.get("default_language"), "en"),
         config_dir=config_dir,
-        block_http_status=block_http_status,
-        block_message=_as_str(raw.get("block_message"), DEFAULT_BLOCK_MESSAGE),
-        streaming_behavior=streaming_behavior,
-        log_details=_as_bool(raw.get("log_details"), False),
-        redact_logs=_as_bool(raw.get("redact_logs"), True),
-        input=input_config,
-        output=output_config,
+        oci_native=oci_native,
+        gateway_policy=gateway_policy,
+        gateway_extensions=gateway_extensions,
     )
 
 
@@ -333,11 +420,11 @@ def extract_text_from_message_content(content: Any, *, include_tool_results: boo
 
 
 def collect_input_text_for_guardrails(body: Dict[str, Any], config: GuardrailsConfig) -> str:
-    if not config.enabled or not config.input.enabled:
+    if not config.enabled or not config.oci_native.input.enabled:
         return ""
 
     parts: List[str] = []
-    if config.input.include_system:
+    if config.gateway_extensions.input.include_system:
         system_text = _extract_text_from_system(body.get("system"))
         if system_text:
             parts.append(system_text)
@@ -350,7 +437,7 @@ def collect_input_text_for_guardrails(body: Dict[str, Any], config: GuardrailsCo
             continue
         text = extract_text_from_message_content(
             message.get("content"),
-            include_tool_results=config.input.include_tool_results,
+            include_tool_results=config.gateway_extensions.input.include_tool_results,
         )
         if text:
             parts.append(text)
@@ -399,7 +486,7 @@ def check_local_blocklist(content: str, blocklist: Iterable[str]) -> List[str]:
 
 
 def redact_pii_text(text: str, pii_entities: Sequence[Dict[str, Any]], *, action: str, placeholder: str) -> str:
-    if action == "none" or not pii_entities:
+    if not pii_entities:
         return text
 
     output = text
@@ -482,9 +569,9 @@ def summarize_guardrails_result(result: GuardrailsCheckResult, *, redact_logs: b
 
 def _build_oci_guardrail_configs(
     *,
-    content_moderation: Optional[ContentModerationConfig],
-    prompt_injection: Optional[PromptInjectionConfig],
-    pii: Optional[PIIConfig],
+    content_moderation: Optional[OciContentModerationConfig],
+    prompt_injection: Optional[OciPromptInjectionConfig],
+    pii_detection: Optional[OciPIIDetectionConfig],
 ) -> Optional[oci.generative_ai_inference.models.GuardrailConfigs]:
     kwargs: Dict[str, Any] = {}
     if content_moderation and content_moderation.enabled:
@@ -499,10 +586,10 @@ def _build_oci_guardrail_configs(
                 "Upgrade the 'oci' package to a newer version that includes Guardrails prompt injection support."
             )
         kwargs["prompt_injection_config"] = prompt_injection_cls()
-    if pii and pii.enabled and pii.types:
+    if pii_detection and pii_detection.enabled and pii_detection.types:
         kwargs["personally_identifiable_information_config"] = (
             oci.generative_ai_inference.models.PersonallyIdentifiableInformationConfiguration(
-                types=list(pii.types)
+                types=list(pii_detection.types)
             )
         )
     if not kwargs:
@@ -539,11 +626,11 @@ async def apply_input_guardrails(
     language_code: Optional[str] = None,
 ) -> GuardrailsCheckResult:
     result = GuardrailsCheckResult(passed=True)
-    if not content or not config.enabled or not config.input.enabled:
+    if not content or not config.enabled or not config.oci_native.input.enabled:
         return result
 
-    if config.input.local_blocklist.enabled and config.input.local_blocklist.entries:
-        matches = check_local_blocklist(content, config.input.local_blocklist.entries)
+    if config.gateway_extensions.input.local_blocklist.enabled and config.gateway_extensions.input.local_blocklist.entries:
+        matches = check_local_blocklist(content, config.gateway_extensions.input.local_blocklist.entries)
         if matches:
             result.issue_detected = True
             result.passed = False
@@ -551,9 +638,9 @@ async def apply_input_guardrails(
             result.blocked_reason = "local_blocklist"
 
     oci_configs = _build_oci_guardrail_configs(
-        content_moderation=config.input.content_moderation,
-        prompt_injection=config.input.prompt_injection,
-        pii=config.input.pii,
+        content_moderation=config.oci_native.input.content_moderation,
+        prompt_injection=config.oci_native.input.prompt_injection,
+        pii_detection=config.oci_native.input.pii_detection,
     )
     if oci_configs is None:
         return result
@@ -562,17 +649,17 @@ async def apply_input_guardrails(
         client=client,
         compartment_id=compartment_id,
         content=content,
-        language_code=language_code or config.default_language,
+        language_code=language_code or config.oci_native.default_language,
         guardrail_configs=oci_configs,
     )
     guardrails_results = getattr(getattr(response, "data", None), "results", None)
     if guardrails_results is None:
         return result
 
-    if config.input.content_moderation.enabled:
+    if config.oci_native.input.content_moderation.enabled:
         cm = _parse_category_scores(
             getattr(guardrails_results, "content_moderation", None),
-            config.input.content_moderation.threshold,
+            config.oci_native.input.content_moderation.threshold,
         )
         result.content_moderation = cm
         if cm.triggered:
@@ -580,10 +667,10 @@ async def apply_input_guardrails(
             result.passed = False
             result.blocked_reason = result.blocked_reason or "content_moderation"
 
-    if config.input.prompt_injection.enabled:
+    if config.oci_native.input.prompt_injection.enabled:
         pi = _parse_prompt_injection(
             getattr(guardrails_results, "prompt_injection", None),
-            config.input.prompt_injection.threshold,
+            config.oci_native.input.prompt_injection.threshold,
         )
         result.prompt_injection = pi
         if pi.triggered:
@@ -591,7 +678,7 @@ async def apply_input_guardrails(
             result.passed = False
             result.blocked_reason = result.blocked_reason or "prompt_injection"
 
-    if config.input.pii.enabled:
+    if config.oci_native.input.pii_detection.enabled:
         pii = _parse_pii(getattr(guardrails_results, "personally_identifiable_information", None))
         result.pii = pii
         if pii.detected:
@@ -611,13 +698,13 @@ async def apply_output_guardrails(
     language_code: Optional[str] = None,
 ) -> GuardrailsCheckResult:
     result = GuardrailsCheckResult(passed=True)
-    if not content or not config.enabled or not config.output.enabled:
+    if not content or not config.enabled or not config.oci_native.output.enabled:
         return result
 
     oci_configs = _build_oci_guardrail_configs(
-        content_moderation=config.output.content_moderation,
+        content_moderation=config.oci_native.output.content_moderation,
         prompt_injection=None,
-        pii=config.output.pii,
+        pii_detection=config.oci_native.output.pii_detection,
     )
     if oci_configs is None:
         return result
@@ -626,17 +713,17 @@ async def apply_output_guardrails(
         client=client,
         compartment_id=compartment_id,
         content=content,
-        language_code=language_code or config.default_language,
+        language_code=language_code or config.oci_native.default_language,
         guardrail_configs=oci_configs,
     )
     guardrails_results = getattr(getattr(response, "data", None), "results", None)
     if guardrails_results is None:
         return result
 
-    if config.output.content_moderation.enabled:
+    if config.oci_native.output.content_moderation.enabled:
         cm = _parse_category_scores(
             getattr(guardrails_results, "content_moderation", None),
-            config.output.content_moderation.threshold,
+            config.oci_native.output.content_moderation.threshold,
         )
         result.content_moderation = cm
         if cm.triggered:
@@ -644,17 +731,18 @@ async def apply_output_guardrails(
             result.passed = False
             result.blocked_reason = "content_moderation"
 
-    if config.output.pii.enabled:
+    if config.oci_native.output.pii_detection.enabled:
         pii = _parse_pii(getattr(guardrails_results, "personally_identifiable_information", None))
         result.pii = pii
         if pii.detected:
             result.issue_detected = True
-            if config.output.pii.action in {"redact", "mask"}:
+            pii_rewrite = config.gateway_extensions.output.pii_rewrite
+            if pii_rewrite.enabled:
                 result.redacted_content = redact_pii_text(
                     content,
                     pii.entities,
-                    action=config.output.pii.action,
-                    placeholder=config.output.pii.placeholder,
+                    action=pii_rewrite.action,
+                    placeholder=pii_rewrite.placeholder,
                 )
 
     return result

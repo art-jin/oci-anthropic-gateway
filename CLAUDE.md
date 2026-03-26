@@ -4,470 +4,150 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OCI-Anthropic Gateway is a translation layer that enables OCI GenAI models (Grok, GPT, Cohere Command-R, etc.) to work with Anthropic's API format. The key feature is enhanced tool calling support for models that don't natively support function calling.
+OCI-Anthropic Gateway translates Anthropic Messages API requests into OCI GenAI requests and converts responses back into Anthropic-compatible JSON or SSE. The main complexity is not FastAPI itself, but the translation layer around model routing, content conversion, tool calling, streaming, guardrails, and debug observability.
 
-**Key Features:**
-- Full Anthropic Messages API compatibility
-- Enhanced tool calling support (native + simulated)
-- Streaming and non-streaming responses
-- Prompt caching support
-- Vision/image analysis
-- Extended thinking mode
-- Modular, maintainable codebase
+## Common Commands
 
-## Development Commands
-
-### Environment Setup
+### Setup
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp config.json.template config.json
 ```
 
-### Run the Server
+### Run locally
 ```bash
-python main.py                        # Binds to server.host:server.port from config.json (default 127.0.0.1:8000)
-LOG_LEVEL=DEBUG python main.py        # Verbose gateway logging
-LOG_LEVEL=WARNING python main.py      # Minimal logging (production)
+python main.py
+LOG_LEVEL=INFO python main.py
+LOG_LEVEL=DEBUG python main.py
 ```
 
-### Run Tests
+`main.py` reads bind host/port and uvicorn log level from `config.json` `server.*`.
+
+### Run tests
 ```bash
-# Integration tests (require running server on localhost:8000)
-PYTHONPATH=. python -m test.01_event_logging
-PYTHONPATH=. python -m test.02_count_tokens
+# Unit tests
+pytest
+pytest test/test_tool_call_detection.py
+pytest test/test_guardrails.py
+
+# Integration-style scripts against a running gateway
 PYTHONPATH=. python -m test.03_messages_non_stream
 PYTHONPATH=. python -m test.04_messages_stream_sse
 PYTHONPATH=. python -m test.05_tools_non_stream_and_tool_result_loop
 
-# With environment variables
-GATEWAY_BASE_URL=http://localhost:8000 GATEWAY_MODEL=your-model PYTHONPATH=. python -m test.03_messages_non_stream
+# Override target gateway/model for script tests
+GATEWAY_BASE_URL=http://localhost:8000 GATEWAY_MODEL=openai.gpt-oss-20b PYTHONPATH=. python -m test.03_messages_non_stream
+```
 
-# Unit tests (no server required)
-pytest                                    # Run all tests in tests/
-pytest tests/test_tool_call_detection.py  # Run specific test file
+### Container flow
+```bash
+docker build -t oci-anthropic-gateway:latest .
+docker-compose up -d
 ```
 
 ## Architecture
 
-### Two API Formats
+### Request path
 
-1. **Cohere Format** (`api_format: "cohere"`):
-   - Uses OCI's native function calling for Cohere models
-   - Tools converted to `CohereTool` format
+The app is intentionally thin at the HTTP layer:
 
-2. **Generic Format** (`api_format: "generic"`):
-   - Uses prompt engineering to simulate tool calling
-   - Models output `<TOOL_CALL>JSON</TOOL_CALL>` format
-   - Gateway detects, parses, and converts to Anthropic format
+1. `main.py` creates the FastAPI app, initializes config on startup, optionally starts the debug dump indexer, and applies in-memory rate limiting.
+2. The catch-all POST route forwards `count_tokens` requests to `src/routes/handlers.py:handle_count_tokens` and `messages` requests to `src/routes/handlers.py:handle_messages_request`.
+3. `handle_messages_request` validates Anthropic-format payloads, assigns `session_id` / `request_id` metadata, checks requested modalities against the selected model, runs input guardrails, and converts Anthropic content into OCI SDK message objects.
+4. `src/services/generation.py` performs the OCI chat call and is responsible for the hard part: adapting parameters per model, injecting tool instructions for generic models, parsing OCI responses, converting tool calls, applying output guardrails, and emitting Anthropic-compatible non-stream or streaming responses.
 
-### Key Modules
+### Model routing and config normalization
 
-| Path | Purpose |
-|------|---------|
-| `src/config/__init__.py` | Config class for loading config.json; initializes OCI GenAI client |
-| `src/services/generation.py` | Core generation logic (streaming & non-streaming OCI responses) |
-| `src/utils/tools.py` | Converts Anthropic tools to OCI/Cohere format; builds tool use instructions |
-| `src/utils/json_helper.py` | Parses and fixes malformed JSON from models; detects tool call blocks |
-| `src/utils/content_converter.py` | Converts between Anthropic, OCI, and Cohere content formats |
-| `src/routes/handlers.py` | FastAPI route handlers for `/v1/messages` and `/v1/messages/count_tokens` |
-| `src/utils/cache.py` | Cache control utilities |
-| `src/utils/token.py` | Token counting and estimation |
-| `src/utils/constants.py` | Constants, stop reasons, pre-compiled regex patterns |
-| `src/utils/logging_config.py` | Logging configuration with flexible levels |
+`src/config/__init__.py` does more than load JSON:
 
-### Tool Call Detection Flow
+- Resolves requested Anthropic model names through `model_aliases`.
+- Normalizes each `model_definitions` entry so runtime code can rely on defaults like `compartment_id`, `max_tokens_key`, and `model_types`.
+- Initializes the OCI client with auth fallback order: OKE workload identity, OCI resource principal, then local `~/.oci/config` API key.
 
-1. Check for structured tool calls (Cohere or Generic format)
-2. If none, check for `<TOOL_CALL>` blocks in text
-3. If still none, use natural language fallback mechanism
-4. Remove tool call markers from response text
-5. Format as Anthropic-compatible response
+Important config fields future agents usually need:
 
-## Configuration
+- `model_definitions.<name>.api_format`: `cohere` uses OCI native tool calling; everything else follows the generic translation path.
+- `model_definitions.<name>.model_types`: gates whether text/images/video/audio inputs are allowed.
+- `debug`: enables JSON debug dumps in `debug_dumps/`.
+- `debug_ui.*`: enables the debug API/UI backed by an indexed dump database.
+- `guardrails.*`: controls OCI ApplyGuardrails on input and non-stream output.
+- `rate_limit.*`: enables the in-memory sliding-window limiter in `main.py`.
 
-Copy `config.json.template` to `config.json`. Key fields:
+### Two response paths
 
-```json
-{
-  "compartment_id": "ocid1.compartment.oc1...",
-  "endpoint": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
-  "model_aliases": {
-    "claude-3-5-sonnet-20241022": "gpt5",
-    "claude-3-opus-20240229": "cohere.command-r-plus"
-  },
-  "model_definitions": {
-    "gpt5": {
-      "ocid": "ocid1.generativeaimodel.oc1...",
-      "api_format": "generic",
-      "max_tokens_key": "max_completion_tokens",
-      "temperature": 1.0
-    },
-    "cohere.command-r-plus": {
-      "ocid": "ocid1.generativeaimodel.oc1...",
-      "api_format": "cohere",
-      "max_tokens_key": "max_tokens",
-      "temperature": 0.7
-    }
-  },
-  "default_model": "gpt5",
-  "debug": false,
-  "server": {
-    "host": "127.0.0.1",
-    "port": 8000,
-    "log_level": "warning"
-  }
-}
+#### 1. Generic models
+
+For non-Cohere models, the gateway simulates tool calling by injecting a system instruction that requires the model to emit:
+
+```text
+<TOOL_CALL>
+{"name": "tool_name", "input": {...}}
+</TOOL_CALL>
 ```
 
-| Field | Description |
-|-------|-------------|
-| `ocid` | OCI model OCID |
-| `api_format` | `"generic"` (simulated tools) or `"cohere"` (native tools) |
-| `max_tokens_key` | Parameter name: `"max_tokens"` or `"max_completion_tokens"` |
-| `temperature` | Fixed temperature (overrides request) |
-| `debug` | Debug-only mode. When `true`, writes diagnostic dumps to `./debug_dumps/`. |
-| `server.host` | Uvicorn bind host (e.g. `127.0.0.1`, `0.0.0.0`). |
-| `server.port` | Uvicorn bind port (1-65535). |
-| `server.log_level` | Uvicorn log level: `critical|error|warning|info|debug|trace`. |
-
-## API Features
-
-### Supported Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/messages` | POST | Create messages (streaming & non-streaming) |
-| `/v1/messages/count_tokens` | POST | Count tokens in request |
-
-### Messages API Features
-
-#### System Prompts
-```json
-{
-  "system": "You are a helpful programming assistant.",
-  "messages": [...]
-}
-```
-
-Array format with cache control:
-```json
-{
-  "system": [
-    {"type": "text", "text": "You are a helpful assistant."},
-    {"type": "text", "text": "Be concise.", "cache_control": {"type": "ephemeral"}}
-  ]
-}
-```
-
-#### Streaming
-Emits Anthropic-compatible SSE events:
-- `message_start`
-- `content_block_start`
-- `content_block_delta`
-- `content_block_stop`
-- `message_delta`
-- `message_stop`
-
-#### Vision / Images
-```json
-{
-  "messages": [{
-    "role": "user",
-    "content": [
-      {"type": "text", "text": "What's in this image?"},
-      {
-        "type": "image",
-        "source": {
-          "type": "base64",
-          "media_type": "image/png",
-          "data": "iVBORw0KGgo..."
-        }
-      }
-    ]
-  }]
-}
-```
-
-#### Extended Thinking
-```json
-{
-  "thinking": {
-    "type": "enabled",
-    "budget_tokens": 16000
-  },
-  "messages": [...]
-}
-```
-
-#### Sampling Parameters
-```json
-{
-  "temperature": 0.7,
-  "top_k": 50,
-  "top_p": 0.9,
-  "max_tokens": 4096,
-  "stop_sequences": ["\n\n", "END"]
-}
-```
-
-## Important Patterns
-
-### JSON Repair (`src/utils/json_helper.py`)
-
-The `fix_json_issues()` function handles malformed JSON from models:
-- Auto-fixes missing quotes
-- Replaces single quotes with double quotes
-- Removes trailing commas
-- Completes incomplete JSON objects
-- Extracts JSON embedded in text
+`src/services/generation.py` then:
 
-### Content Conversion (`src/utils/content_converter.py`)
+- buffers or extracts text from OCI responses,
+- looks for structured tool calls first,
+- falls back to `<TOOL_CALL>` block detection via `src/utils/json_helper.py`,
+- optionally uses natural-language fallback if `enable_nl_tool_fallback` is enabled,
+- strips tool-call markup from assistant text,
+- returns Anthropic `tool_use` blocks plus any remaining text.
 
-Handles three formats:
-- **Anthropic format**: `{"type": "text", "text": "..."}` or `{"type": "image", "source": {...}}`
-- **OCI format**: `{"type": "TEXT", "text": "..."}`
-- **Cohere format**: Different message structure for Cohere models
+Streaming generic responses are especially important: the service buffers text when tools are present, then emits Anthropic SSE events only after tool detection completes.
 
-### Streaming Response Format
+#### 2. Cohere models
 
-Responses are streamed as Server-Sent Events (SSE) in Anthropic format:
-```
-event: content_block_delta
-data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "..."}}
-```
+For `api_format: "cohere"`, the gateway converts Anthropic messages/tools into Cohere-specific request structures and relies on OCI native tool calling. This path skips the prompt-engineered `<TOOL_CALL>` simulation.
 
-## Logging and Debugging
+### Content conversion boundaries
 
-Control log output using the `LOG_LEVEL` environment variable:
+The conversion layer is split across utilities:
 
-```bash
-LOG_LEVEL=WARNING python main.py   # Minimal (production)
-LOG_LEVEL=INFO python main.py      # Balanced (default, development)
-LOG_LEVEL=DEBUG python main.py     # Verbose (debugging)
-```
+- `src/utils/content_converter.py` converts Anthropic content blocks to OCI SDK content and handles response-side extraction.
+- `src/utils/tools.py` converts Anthropic tool schemas into Cohere tools and builds generic tool-use instructions.
+- `src/utils/request_validation.py` validates payload shape and modality compatibility before conversion.
+- `src/utils/token.py` powers `/v1/messages/count_tokens` and rough usage estimates on responses.
 
-**What Gets Logged:**
-- **WARNING**: Configuration loaded, server status, critical errors only
-- **INFO**: Request summaries, tool call detection results, key operational events
-- **DEBUG**: Detailed parameters, content conversion, JSON parsing, OCI SDK requests
+When debugging malformed model output or tool parsing, `src/utils/json_helper.py` is a primary file to inspect.
 
-## Troubleshooting
+### Guardrails flow
 
-### Tool Calls Not Detected
-1. Review logs for tool detection messages
-2. Verify tool definition format
-3. Try explicit tool names in user message
-4. Test with `tool_choice: "required"`
+Guardrails are integrated in two different phases:
 
-**Known failure mode (fixed):**
-- For long/complex tool calls (especially `Edit`), the literal string `</TOOL_CALL>` can appear inside JSON string fields such as `Edit.new_string`.
-- Older parsing could be misled by that literal and truncate the JSON early, resulting in `detected=[]`.
-- The gateway now extracts the *first balanced JSON object* after `<TOOL_CALL>` before searching for the real closing tag, making detection robust to `</TOOL_CALL>` appearing inside JSON strings.
-- Tool names are normalized (e.g. `edit` -> `Edit`) to reduce failures from model casing/style drift.
+- Input guardrails run in `src/routes/handlers.py` before the OCI chat request, using text extracted from user messages, and optionally system/tool-result content.
+- Output guardrails run only in non-stream mode inside `src/services/generation.py` after text is produced.
 
-**End-to-end verification:**
-1. Restart the gateway.
-2. Re-run the same Anthropic conversation that previously produced a long `Edit` tool call.
-3. Inspect `debug_dumps/*_stream_tool_detection_primary.json` and confirm `detected` is non-empty, and verify the client actually executes the `Edit` tool call.
+If output guardrails are enabled and the request asks for streaming, the handler either rejects the request or downgrades it to non-stream based on `guardrails.streaming_behavior`.
 
-### JSON Parsing Errors
-1. Review raw model output in logs
-2. Check for special characters
-3. Review `fix_json_issues` logs
+The gateway depends on `oci>=2.164.0` because prompt-injection guardrails require newer SDK types.
 
-### Model Not Following Tool Format
-1. Switch to a Cohere model for native support
-2. Use more explicit prompts
-3. Set `tool_choice: "required"`
+### Debug UI and observability
 
-## Adding New Models
+There are two separate debug mechanisms:
 
-1. Get the OCI model OCID from OCI Console
-2. Add to `model_definitions` in `config.json`
-3. Optionally add alias in `model_aliases`
+- `debug=true` writes per-request JSON dumps into `debug_dumps/`.
+- `debug_ui.enabled=true` starts the indexer and exposes `/debug/api/*` plus static files under `web/debug/`.
 
-## Prerequisites
+The debug UI is backed by indexed dump files, not live request state. `src/debug/routes.py` serves session/timeline APIs and SSE feeds; startup in `main.py` launches `DebugDumpIndexer` to ingest dumps and broadcast timeline events.
 
-- Python 3.12+
-- OCI CLI configured (`~/.oci/config`)
-- OCI account with GenAI service access
+Use this when investigating tool-call parsing, stream ordering, or OCI request/response mismatches.
 
-## Dependencies
+## Testing Notes
 
-```
-fastapi>=0.115.0
-uvicorn>=0.30.0
-httpx>=0.27.0
-python-dotenv>=1.0.0
-oci==2.131.1
-```
+The repo has both pytest tests and numbered runnable scripts under `test/`.
 
-## Security Notes
+- `pytest` covers focused units such as tool detection, normalization, config validation, rate limiting, request validation, debug dumps, and guardrails.
+- `test/03` through `test/10` are scenario scripts that exercise the running gateway end to end.
 
-- `config.json` is in `.gitignore` - never commit it
-- Use OCI IAM policies to restrict model access
-- Consider implementing authentication for production
+If you change streaming, tool detection, multimodal validation, or guardrails, update the relevant script tests as well as unit tests.
 
-## Changelog
-
-### 2026-03-07: Debug UI Bug Fixes
+## Known Important Behaviors
 
-**Bug Fix 1: Clear Button Not Working**
-
-**Problem:** The Clear button in the debug swimlane UI did not actually clear data. The frontend sent a GET request instead of DELETE.
-
-**Root Cause:** `web/debug/common.js` `api()` function only accepted `path` parameter, ignoring the second `options` parameter. When `api('/clear', { method: 'DELETE' })` was called, the `{ method: 'DELETE' }` was silently dropped.
-
-**Fix:**
-- Updated `api(path, options = {})` to accept and pass through fetch options
-- Added support for `method`, `headers`, and other fetch options
-- Handle empty responses (204, content-length: 0)
-
-**Files Changed:**
-- `web/debug/common.js` - Added `options` parameter to `api()` function
-
----
-
-**Bug Fix 2: Swimlane Event Order Incorrect**
-
-**Problem:** In real-time SSE updates, events appeared in wrong order. For example, `oci_request` (gateway→oci) appeared on row 1, while `request_summary` (client→gateway) appeared on row 2. This made arrows look like they started from the middle instead of the left.
-
-**Root Cause:** SSE events were appended to the events array in arrival order, not timestamp order. Since dump files are indexed in quick succession, the arrival order may differ from the actual chronological order.
-
-**Fix:**
-- Sort events by `ts` timestamp after adding new SSE event
-- Re-render all events (instead of incremental append) to ensure correct positioning
-
-**Files Changed:**
-- `web/debug/swimlane.js` - Modified `onNewEvent()` to sort by timestamp and re-render
-
-**Visual Result:**
-```
-Row 1: request_summary    (client → gateway)   ✓ Correct order
-Row 2: oci_request        (gateway → oci)
-Row 3: oci_response       (oci → gateway)
-Row 4: tool_detection     (internal, no arrow)
-Row 5: final_response     (gateway → client)
-```
-
-### 2026-03-05: Docker & Kubernetes Deployment Support
-
-**New Feature:** Containerized deployment with multiple authentication methods.
-
-**Docker Files:**
-- `Dockerfile` - Python 3.12-slim based image
-- `docker-compose.yml` - Service orchestration
-- `.dockerignore` - Build optimization
-- `entrypoint.sh` - Startup script with auth detection
-
-**Kubernetes Files:**
-- `k8s/deployment-workload-identity.yaml` - OKE Workload Identity deployment (recommended)
-- `k8s/deployment-with-secrets.yaml` - Kubernetes Secrets deployment (alternative)
-
-**Authentication Methods:**
-1. **API Key** (local development) - Mount `~/.oci` directory
-2. **Workload Identity** (OKE) - Set `OCI_RESOURCE_PRINCIPAL_VERSION=2.2`, no API keys needed
-3. **Kubernetes Secrets** - Store OCI credentials as K8s secrets
-
-**Fine-grained Authorization (OKE):**
-| Scope | Dynamic Group Rule | Security |
-|-------|-------------------|----------|
-| Cluster-wide | `ALL {resource.type = 'cluster', resource.id = '<ocid>'}` | ⭐ Basic |
-| Namespace | `... + request.principal.namespace = 'gateway-ns'` | ⭐⭐ Better |
-| ServiceAccount | `... + request.principal.service_account = 'gateway-sa'` | ⭐⭐⭐ Best |
-
-**Code Changes:**
-- `src/config/__init__.py` - Auto-detect authentication method
-- `entrypoint.sh` - Validate auth configuration at startup
-
-**Security:**
-- No credentials baked into Docker image
-- Credentials injected at runtime via volume mounts or environment
-- Supports fine-grained IAM policies for Pod-level access control
-
-### 2026-03-05: Real-time Swimlane Debug UI
-
-**New Feature:** Live visualization of message flow through the gateway.
-
-**Swimlane Diagram:**
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│     CLIENT      │     │     GATEWAY     │     │    OCI GenAI    │
-│   (Anthropic)   │     │                 │     │                 │
-└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
-         │                       │                       │
-         │───── Request ────────►│                       │
-         │     (full body)       │                       │
-         │                       │                       │
-         │                       │───── OCI Request ────►│
-         │                       │                       │
-         │                       │◄──── Stream Text ─────│
-         │                       │                       │
-         │                       │ ▒▒ Tool Detection ▒▒  │  ← Internal processing
-         │                       │   (parse <TOOL_CALL>) │
-         │                       │                       │
-         │◄──── Response ────────│                       │
-         │   (Anthropic format)  │                       │
-```
-
-**Visual Elements:**
-- ⚫ Circle + Line = Message transfer between entities
-- ▬▬ Rectangle = Internal processing (tool detection, JSON parsing)
-- Colors = Different sessions in global view
-
-**Access:** `http://localhost:8000/debug/`
-
-**Key Files:**
-- `web/debug/index.html` - Global swimlane view (default)
-- `web/debug/swimlane.js` - SVG rendering + SSE real-time updates
-- `web/debug/swimlane.css` - Styles
-- `src/debug/routes.py` - `/timeline` and `/events` SSE endpoints
-- `src/debug/repository.py` - `get_all_timeline()` method
-
-**Features:**
-- Real-time SSE updates
-- Click nodes to view full JSON payload
-- Multi-session view with color coding
-- Auto-scroll to latest events
-- Connection status indicator
-
-### 2026-03-04: Debug dumps for tool call instability + configurable server bind
-
-**Problem:** Tool call detection could become unstable under long/complex outputs (e.g. missing `<TOOL_CALL>` wrapper, missing closing marker, or streaming timing issues), making root-cause hard to reproduce.
-
-**Fix:**
-- Added `debug` flag in `config.json` to enable debug-only observability dumps written to `./debug_dumps/`.
-- Dumps include request/response summaries and tool detection evidence for both non-streaming and streaming flows.
-- Fixed a core parsing edge case where the literal string `</TOOL_CALL>` can appear inside JSON string fields (e.g. `Edit.new_string`) and mislead older extraction logic. The gateway now extracts the first balanced JSON object after `<TOOL_CALL>` before searching for the real closing tag (see `src/utils/json_helper.py`).
-- Added common tool-name normalization (e.g. `edit` -> `Edit`) to reduce failures from model casing/style drift (see `src/utils/json_helper.py`).
-- Made Uvicorn bind configurable via `config.json`:
-  - `server.host`
-  - `server.port`
-  - `server.log_level`
-
-**Notes:**
-- When `debug` is disabled, dump writing is a no-op.
-- Dump write failures must not impact request flow.
-
-### 2025-02-15: Fix Streaming Tool Call Detection
-
-**Problem:** In streaming mode, tool calls were not being detected and converted. The `<TOOL_CALL>` blocks were passed through as plain text instead of being converted to Anthropic `tool_use` format.
-
-**Root Cause:** `src/services/generation.py` line 620 had `buffer_text_for_tool_detection = False` hardcoded, disabling tool detection in streaming mode.
-
-**Fix:**
-```python
-# Before (broken)
-buffer_text_for_tool_detection = False
-
-# After (fixed)
-buffer_text_for_tool_detection = has_tools and not is_cohere
-```
-
-**Test:** Run `python test_tool_call.py` to verify tool calling works in both streaming and non-streaming modes.
-
-**Verified Capabilities:**
-- Maximum parallel tool calls tested: 6
-- Supported tools: 17 (Task, Bash, Read, Write, Edit, Glob, Grep, etc.)
-- Both streaming and non-streaming modes working
+- The POST API is implemented as a catch-all route in `main.py`, so endpoint matching is substring-based (`messages`, `count_tokens`, `event_logging`) rather than explicit FastAPI path declarations.
+- Streaming tool detection for generic models depends on buffering the full text when tools are present.
+- Tool-call parsing is hardened against literal `</TOOL_CALL>` appearing inside JSON string fields by extracting the first balanced JSON object after `<TOOL_CALL>`.
+- `metadata.session_id` and `metadata.request_id` are auto-filled if missing and are used by the debug timeline and rate-limit keying.
+- Model modality validation happens before content conversion, so image/video/audio failures are usually config issues (`model_types`) rather than OCI SDK issues.
